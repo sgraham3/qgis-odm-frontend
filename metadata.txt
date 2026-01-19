@@ -1,0 +1,15 @@
+[general]
+name=ODM Frontend
+qgisMinimumVersion=3.10
+qgisMaximumVersion=3.99
+description=QGIS frontend for OpenDroneMap (ODM) processing
+about=This plugin provides a user-friendly interface to OpenDroneMap (ODM) for processing drone imagery directly within QGIS. Users can create projects, upload images, configure processing options, and import results back into QGIS.
+category=Raster
+version=1.0.0
+author=QGIS ODM Plugin
+email=
+homepage=
+tracker=
+repository=
+experimental=False
+deprecated=False
