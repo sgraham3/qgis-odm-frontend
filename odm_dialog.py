@@ -4,8 +4,9 @@ from qgis.PyQt.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                  QLineEdit, QPushButton, QTabWidget, QWidget,
                                  QGroupBox, QListWidget, QFileDialog, QMessageBox,
                                  QProgressBar, QTextEdit, QCheckBox, QComboBox,
-                                 QSpinBox, QDialogButtonBox, QFormLayout)
-from qgis.PyQt.QtCore import QThread, pyqtSignal, QTimer
+                                 QSpinBox, QDialogButtonBox, QFormLayout, QSizePolicy, 
+                                 QGridLayout, QScrollArea, QMenu, QAction)
+from qgis.PyQt.QtCore import QThread, pyqtSignal, QTimer, Qt
 from qgis.core import QgsProject
 from .odm_connection import ODMConnection
 
@@ -23,58 +24,71 @@ class ODMDialog(QDialog):
         
     def init_ui(self):
         self.setWindowTitle('ODM Frontend')
-        self.setGeometry(200, 200, 900, 700)  # Larger default size for better readability
-        self.setMinimumSize(700, 600)  # Larger minimum size
-        self.setMaximumSize(1400, 1000)  # Allow larger maximum
+        self.setGeometry(200, 200, 600, 550)  # Compact size
+        self.setMinimumSize(500, 450)
 
+        # Main Layout
         layout = QVBoxLayout()
+        layout.setContentsMargins(5, 5, 5, 5)
         
-        # Project controls above tabs
-        project_controls_layout = QHBoxLayout()
+        # --- TOP BAR (Hamburger + Connection) ---
+        top_bar_layout = QHBoxLayout()
         
-        self.save_project_btn = QPushButton('💾 Save Project')
-        self.save_project_btn.clicked.connect(self.save_project)
-        self.save_project_btn.setToolTip('Save current configuration to file')
+        # Hamburger Menu Button
+        self.menu_btn = QPushButton('☰')
+        self.menu_btn.setFixedWidth(30)
+        self.menu_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent; 
+                color: #007bff; 
+                border: none; 
+                font-size: 20px; 
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                color: #0056b3;
+                background-color: #f0f0f0;
+            }
+        """)
+        self.menu_btn.setToolTip('Project Menu')
         
-        self.open_project_btn = QPushButton('📂 Open Project')
-        self.open_project_btn.clicked.connect(self.open_project)
-        self.open_project_btn.setToolTip('Load previously saved configuration')
+        # Build the menu
+        self.project_menu = QMenu(self)
+        open_action = QAction('📂 Open Project', self)
+        open_action.triggered.connect(self.open_project)
+        save_action = QAction('💾 Save Project', self)
+        save_action.triggered.connect(self.save_project)
+        self.project_menu.addAction(open_action)
+        self.project_menu.addAction(save_action)
         
-        project_controls_layout.addWidget(self.save_project_btn)
-        project_controls_layout.addWidget(self.open_project_btn)
-        project_controls_layout.addStretch()
+        # Connect button to show menu
+        self.menu_btn.setMenu(self.project_menu)
         
-        layout.addLayout(project_controls_layout)
-        
-        # Connection settings
-        connection_group = QGroupBox('ODM Server Connection')
-        connection_layout = QHBoxLayout()
-        
+        # Connection Controls
         self.url_edit = QLineEdit(self.odm.base_url)
         self.url_edit.setPlaceholderText('http://localhost:3000')
-        self.url_edit.setToolTip('ODM/NodeODM server URL (e.g., http://localhost:3000 or http://192.168.1.100:3000)')
+        self.url_edit.setToolTip('ODM/NodeODM server URL')
 
         self.token_edit = QLineEdit(self.odm.token)
-        self.token_edit.setPlaceholderText('Authentication token (optional)')
-        self.token_edit.setToolTip('Authentication token for secured ODM servers (leave empty for no authentication)')
+        self.token_edit.setPlaceholderText('Token')
+        self.token_edit.setToolTip('Authentication token (optional)')
 
-        connect_btn = QPushButton('Test Connection')
+        connect_btn = QPushButton('Test')
         connect_btn.clicked.connect(self.test_connection)
-        connect_btn.setToolTip('Test connection to the ODM server to verify it\'s running and accessible')
+        connect_btn.setToolTip('Test connection')
         
-        connection_layout.addWidget(QLabel('URL:'))
-        connection_layout.addWidget(self.url_edit)
-        connection_layout.addWidget(QLabel('Token:'))
-        connection_layout.addWidget(self.token_edit)
-        connection_layout.addWidget(connect_btn)
+        top_bar_layout.addWidget(self.menu_btn)
+        top_bar_layout.addWidget(self.url_edit)
+        top_bar_layout.addWidget(self.token_edit)
+        top_bar_layout.addWidget(connect_btn)
         
-        connection_group.setLayout(connection_layout)
-        layout.addWidget(connection_group)
+        layout.addLayout(top_bar_layout)
         
         # Tab widget
         self.tabs = QTabWidget()
         
-        # Processing tab (now first)
+        # Processing tab
         self.processing_tab = QWidget()
         processing_layout = QVBoxLayout()
         
@@ -84,17 +98,15 @@ class ODMDialog(QDialog):
         
         self.images_list = QListWidget()
         self.images_list.itemClicked.connect(self.select_project)
-        self.images_list.setToolTip('List of uploaded drone images for processing - click to select')
+        self.images_list.setToolTip('List of uploaded drone images')
 
+        images_btn_layout = QHBoxLayout()
         add_images_btn = QPushButton('Add Images')
         add_images_btn.clicked.connect(self.add_images)
-        add_images_btn.setToolTip('Select and upload drone images (JPEG, PNG, TIFF) for processing')
-
-        clear_images_btn = QPushButton('Clear Images')
-        clear_images_btn.clicked.connect(self.clear_images)
-        clear_images_btn.setToolTip('Remove all uploaded images from the processing queue')
         
-        images_btn_layout = QHBoxLayout()
+        clear_images_btn = QPushButton('Clear')
+        clear_images_btn.clicked.connect(self.clear_images)
+        
         images_btn_layout.addWidget(add_images_btn)
         images_btn_layout.addWidget(clear_images_btn)
         
@@ -102,16 +114,13 @@ class ODMDialog(QDialog):
         images_layout.addLayout(images_btn_layout)
         images_group.setLayout(images_layout)
         
-        # Processing options
-        options_group = QGroupBox('Processing Options')
-        options_layout = QVBoxLayout()
+        # Task Settings (Simplified)
+        options_group = QGroupBox('Task Settings')
+        options_grid = QGridLayout()
+        options_grid.setContentsMargins(5, 5, 5, 5)
 
         # WebODM Field Presets
-        preset_layout = QHBoxLayout()
-        preset_label = QLabel('Processing Preset:')
-        preset_label.setToolTip('Select from WebODM-compatible processing presets for optimal results')
-        preset_layout.addWidget(preset_label)
-
+        options_grid.addWidget(QLabel('Preset:'), 0, 0)
         self.preset_combo = QComboBox()
         self.preset_combo.addItems([
             'Custom', 'Default', 'High Resolution', 'Fast Orthophoto',
@@ -119,249 +128,180 @@ class ODMDialog(QDialog):
         ])
         self.preset_combo.setCurrentText('Default')
         self.preset_combo.currentTextChanged.connect(self.apply_preset)
-        self.preset_combo.setToolTip('Choose a preset configuration optimized for different use cases')
-        preset_layout.addWidget(self.preset_combo)
-        preset_layout.addStretch()
-
-        options_layout.addLayout(preset_layout)
+        self.preset_combo.setToolTip('Processing preset')
+        options_grid.addWidget(self.preset_combo, 0, 1)
         
-        # Common options
-        feature_extraction_layout = QHBoxLayout()
-        feature_label = QLabel('Feature Extraction:')
-        feature_label.setToolTip('Algorithm sensitivity for detecting image features')
-        feature_extraction_layout.addWidget(feature_label)
-
-        self.feature_extraction_combo = QComboBox()
-        self.feature_extraction_combo.addItems(['auto', 'high', 'medium', 'low'])
-        self.feature_extraction_combo.setToolTip('Higher settings detect more features but process slower')
-        feature_extraction_layout.addWidget(self.feature_extraction_combo)
-
-        camera_lens_layout = QHBoxLayout()
-        camera_lens_label = QLabel('Camera Lens:')
-        camera_lens_label.setToolTip('Camera lens type for distortion correction')
-        camera_lens_layout.addWidget(camera_lens_label)
-
-        self.camera_lens_combo = QComboBox()
-        self.camera_lens_combo.addItems(['auto', 'perspective', 'fisheye', 'spherical'])
-        self.camera_lens_combo.setToolTip('Select based on your camera lens type')
-        camera_lens_layout.addWidget(self.camera_lens_combo)
-
-        # Quality options
-        quality_layout = QHBoxLayout()
-        quality_label = QLabel('Quality:')
-        quality_label.setToolTip('Overall processing quality and resolution')
-        quality_layout.addWidget(quality_label)
-
-        self.quality_spin = QSpinBox()
-        self.quality_spin.setRange(1, 100)
-        self.quality_spin.setValue(50)
-        self.quality_spin.setToolTip('Higher values = better quality but slower processing (1-100)')
-        quality_layout.addWidget(self.quality_spin)
-        
-        # Additional options
-        self.dsm_checkbox = QCheckBox('Generate DSM')
-        self.dsm_checkbox.setToolTip('Digital Surface Model: includes terrain + buildings/vegetation')
-
-        self.dtm_checkbox = QCheckBox('Generate DTM')
-        self.dtm_checkbox.setToolTip('Digital Terrain Model: bare earth terrain only (no objects)')
-
-        self.orthophoto_checkbox = QCheckBox('Generate Orthophoto')
-        self.orthophoto_checkbox.setToolTip('Georeferenced orthophoto mosaic from all images')
+        # Basic Toggles
+        checkbox_layout = QHBoxLayout()
+        self.dsm_checkbox = QCheckBox('DSM')
+        self.dtm_checkbox = QCheckBox('DTM')
+        self.orthophoto_checkbox = QCheckBox('Orthophoto')
         self.orthophoto_checkbox.setChecked(True)
         
-        options_layout.addLayout(feature_extraction_layout)
-        options_layout.addLayout(camera_lens_layout)
-        options_layout.addLayout(quality_layout)
-        options_layout.addWidget(self.dsm_checkbox)
-        options_layout.addWidget(self.dtm_checkbox)
-        options_layout.addWidget(self.orthophoto_checkbox)
-        
-        options_group.setLayout(options_layout)
-        
+        checkbox_layout.addWidget(self.dsm_checkbox)
+        checkbox_layout.addWidget(self.dtm_checkbox)
+        checkbox_layout.addWidget(self.orthophoto_checkbox)
+        options_grid.addLayout(checkbox_layout, 1, 0, 1, 2)
 
+        options_group.setLayout(options_grid)
         
         # Processing controls
         process_btn_layout = QHBoxLayout()
         self.start_task_btn = QPushButton('▶️ Create Task & Start Processing')
         self.start_task_btn.clicked.connect(self.start_task_processing)
-        self.start_task_btn.setToolTip('Upload images and start ODM processing with current settings')
+        self.start_task_btn.setStyleSheet("font-weight: bold; padding: 5px;")
 
-        self.stop_task_btn = QPushButton('⏹️ Stop Task')
+        self.stop_task_btn = QPushButton('⏹️ Stop')
         self.stop_task_btn.clicked.connect(self.stop_task)
-        self.stop_task_btn.setToolTip('Cancel the currently running processing task')
         self.stop_task_btn.setEnabled(False)
 
         process_btn_layout.addWidget(self.start_task_btn)
         process_btn_layout.addWidget(self.stop_task_btn)
-        process_btn_layout.addStretch()
 
         self.progress_bar = QProgressBar()
-        self.progress_bar.setToolTip('Real-time processing progress (may take minutes to hours)')
-
         status_label = QLabel('Status:')
-        status_label.setToolTip('Processing status and detailed messages from ODM')
 
         self.status_text = QTextEdit()
-        self.status_text.setMaximumHeight(100)
+        self.status_text.setMaximumHeight(80)
         self.status_text.setReadOnly(True)
-        self.status_text.setToolTip('Live status updates and processing messages')
 
-        processing_layout.addWidget(images_group)
-        processing_layout.addWidget(options_group)
+        processing_layout.addWidget(images_group, 1)
+        processing_layout.addWidget(options_group, 0)
         processing_layout.addLayout(process_btn_layout)
-
-        # Add some spacing
-        processing_layout.addSpacing(10)
-
-        processing_layout.addWidget(self.progress_bar)
-        processing_layout.addWidget(status_label)
+        
+        status_layout = QHBoxLayout()
+        status_layout.addWidget(status_label)
+        status_layout.addWidget(self.progress_bar)
+        processing_layout.addLayout(status_layout)
+        
         processing_layout.addWidget(self.status_text)
         
         self.processing_tab.setLayout(processing_layout)
         self.tabs.addTab(self.processing_tab, 'Processing')
 
-        # Options tab (moved to 2nd position)
+        # --- OPTIONS TAB (All Options) ---
         self.options_tab = QWidget()
-        options_tab_layout = QVBoxLayout()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_content = QWidget()
+        options_tab_layout = QVBoxLayout(scroll_content)
+        options_tab_layout.setSpacing(10)
 
-        # Advanced ODM options
-        advanced_group = QGroupBox('Advanced Processing Options')
-        advanced_layout = QVBoxLayout()
+        # Group 1: Camera & Reconstruction
+        cam_group = QGroupBox('Camera & Reconstruction')
+        cam_grid = QGridLayout()
 
-        # Reconstruction options
-        recon_layout = QHBoxLayout()
-        recon_layout.addWidget(QLabel('Reconstruction:'))
+        cam_grid.addWidget(QLabel('Feature Extraction:'), 0, 0)
+        self.feature_extraction_combo = QComboBox()
+        self.feature_extraction_combo.addItems(['auto', 'high', 'medium', 'low'])
+        cam_grid.addWidget(self.feature_extraction_combo, 0, 1)
+
+        cam_grid.addWidget(QLabel('Camera Lens:'), 0, 2)
+        self.camera_lens_combo = QComboBox()
+        self.camera_lens_combo.addItems(['auto', 'perspective', 'fisheye', 'spherical'])
+        cam_grid.addWidget(self.camera_lens_combo, 0, 3)
+
+        cam_grid.addWidget(QLabel('Quality (1-100):'), 1, 0)
+        self.quality_spin = QSpinBox()
+        self.quality_spin.setRange(1, 100)
+        self.quality_spin.setValue(50)
+        cam_grid.addWidget(self.quality_spin, 1, 1)
+
+        cam_grid.addWidget(QLabel('Reconstruction:'), 1, 2)
         self.recon_combo = QComboBox()
         self.recon_combo.addItems(['high', 'medium', 'low'])
         self.recon_combo.setCurrentText('high')
-        recon_layout.addWidget(self.recon_combo)
-        recon_layout.addStretch()
+        cam_grid.addWidget(self.recon_combo, 1, 3)
 
-        # Camera parameters
-        camera_layout = QHBoxLayout()
-        camera_layout.addWidget(QLabel('FOV:'))
+        cam_grid.addWidget(QLabel('FOV (deg):'), 2, 0)
         self.fov_spin = QSpinBox()
         self.fov_spin.setRange(1, 180)
         self.fov_spin.setValue(60)
-        camera_layout.addWidget(self.fov_spin)
-        camera_layout.addWidget(QLabel('degrees'))
-        camera_layout.addStretch()
+        cam_grid.addWidget(self.fov_spin, 2, 1)
 
-        # Point cloud options
-        pointcloud_layout = QHBoxLayout()
-        pointcloud_layout.addWidget(QLabel('Point Cloud Density:'))
+        cam_group.setLayout(cam_grid)
+        options_tab_layout.addWidget(cam_group)
+
+        # Group 2: Point Cloud & Filtering
+        pc_group = QGroupBox('Point Cloud')
+        pc_grid = QGridLayout()
+
+        pc_grid.addWidget(QLabel('Density:'), 0, 0)
         self.pc_density_combo = QComboBox()
         self.pc_density_combo.addItems(['high', 'medium', 'low'])
         self.pc_density_combo.setCurrentText('medium')
-        pointcloud_layout.addWidget(self.pc_density_combo)
-        pointcloud_layout.addStretch()
+        pc_grid.addWidget(self.pc_density_combo, 0, 1)
 
-        advanced_layout.addLayout(recon_layout)
-        advanced_layout.addLayout(camera_layout)
-        advanced_layout.addLayout(pointcloud_layout)
-        advanced_group.setLayout(advanced_layout)
-
-        # Filtering options
-        filtering_group = QGroupBox('Point Cloud Filtering')
-        filtering_layout = QVBoxLayout()
-
-        # Statistical outlier removal
-        outlier_layout = QHBoxLayout()
-        outlier_layout.addWidget(QLabel('Statistical Outlier Removal:'))
+        pc_grid.addWidget(QLabel('Outlier Removal:'), 1, 0)
+        filter_box = QHBoxLayout()
         self.outlier_checkbox = QCheckBox('Enable')
-        self.outlier_checkbox.setChecked(False)
-        outlier_layout.addWidget(self.outlier_checkbox)
-        outlier_layout.addStretch()
-
-        # Absolute deviation
-        deviation_layout = QHBoxLayout()
-        deviation_layout.addWidget(QLabel('Standard Deviation:'))
+        filter_box.addWidget(self.outlier_checkbox)
+        filter_box.addWidget(QLabel('Deviation:'))
         self.deviation_spin = QSpinBox()
         self.deviation_spin.setRange(1, 50)
         self.deviation_spin.setValue(5)
-        deviation_layout.addWidget(self.deviation_spin)
-        deviation_layout.addStretch()
+        filter_box.addWidget(self.deviation_spin)
+        pc_grid.addLayout(filter_box, 1, 1)
 
-        filtering_layout.addLayout(outlier_layout)
-        filtering_layout.addLayout(deviation_layout)
-        filtering_group.setLayout(filtering_layout)
+        pc_group.setLayout(pc_grid)
+        options_tab_layout.addWidget(pc_group)
 
-        # Output options
-        output_group = QGroupBox('Output Formats')
-        output_layout = QVBoxLayout()
+        # Group 3: Outputs
+        output_group = QGroupBox('Outputs')
+        output_grid = QGridLayout()
 
-        # Resolution settings
-        resolution_layout = QHBoxLayout()
-        resolution_layout.addWidget(QLabel('Orthophoto Resolution:'))
+        output_grid.addWidget(QLabel('Ortho Resolution (cm):'), 0, 0)
         self.resolution_spin = QSpinBox()
         self.resolution_spin.setRange(1, 100)
-        self.resolution_spin.setValue(24)
-        resolution_layout.addWidget(self.resolution_spin)
-        resolution_layout.addWidget(QLabel('px'))
-        resolution_layout.addStretch()
+        self.resolution_spin.setValue(5)
+        output_grid.addWidget(self.resolution_spin, 0, 1)
 
-        # Tile size
-        tile_layout = QHBoxLayout()
-        tile_layout.addWidget(QLabel('Tile Size:'))
+        output_grid.addWidget(QLabel('Tile Size (px):'), 0, 2)
         self.tile_combo = QComboBox()
         self.tile_combo.addItems(['2048', '4096', '8192'])
         self.tile_combo.setCurrentText('2048')
-        tile_layout.addWidget(self.tile_combo)
-        tile_layout.addWidget(QLabel('px'))
-        tile_layout.addStretch()
+        output_grid.addWidget(self.tile_combo, 0, 3)
 
-        # Additional outputs
-        additional_layout = QVBoxLayout()
-        self.texture_checkbox = QCheckBox('Generate Textured Mesh')
+        additional_layout = QHBoxLayout()
+        self.texture_checkbox = QCheckBox('Textured Mesh')
         self.texture_checkbox.setChecked(True)
-        self.video_checkbox = QCheckBox('Generate Video')
+        self.video_checkbox = QCheckBox('Video')
         self.video_checkbox.setChecked(False)
-        self.report_checkbox = QCheckBox('Generate Processing Report')
+        self.report_checkbox = QCheckBox('Report')
         self.report_checkbox.setChecked(True)
 
         additional_layout.addWidget(self.texture_checkbox)
         additional_layout.addWidget(self.video_checkbox)
         additional_layout.addWidget(self.report_checkbox)
+        output_grid.addLayout(additional_layout, 1, 0, 1, 4)
 
-        output_layout.addLayout(resolution_layout)
-        output_layout.addLayout(tile_layout)
-        output_layout.addLayout(additional_layout)
-        output_group.setLayout(output_layout)
+        output_group.setLayout(output_grid)
+        options_tab_layout.addWidget(output_group)
 
-        # Performance options
-        performance_group = QGroupBox('Performance & Resources')
-        performance_layout = QVBoxLayout()
-
-        # Thread count
-        threads_layout = QHBoxLayout()
-        threads_layout.addWidget(QLabel('Max Threads:'))
+        # Group 4: Performance
+        performance_group = QGroupBox('Performance')
+        performance_layout = QHBoxLayout()
+        performance_layout.addWidget(QLabel('Threads:'))
         self.threads_spin = QSpinBox()
-        self.threads_spin.setRange(1, 32)
-        self.threads_spin.setValue(0)  # 0 means auto-detect
-        threads_layout.addWidget(self.threads_spin)
-        threads_layout.addStretch()
-
-        # Memory limit
-        memory_layout = QHBoxLayout()
-        memory_layout.addWidget(QLabel('Memory Limit (GB):'))
+        self.threads_spin.setRange(0, 32)
+        self.threads_spin.setValue(0)
+        performance_layout.addWidget(self.threads_spin)
+        performance_layout.addWidget(QLabel('Memory (GB):'))
         self.memory_spin = QSpinBox()
         self.memory_spin.setRange(1, 64)
         self.memory_spin.setValue(8)
-        memory_layout.addWidget(self.memory_spin)
-        memory_layout.addStretch()
-
-        performance_layout.addLayout(threads_layout)
-        performance_layout.addLayout(memory_layout)
+        performance_layout.addWidget(self.memory_spin)
         performance_group.setLayout(performance_layout)
-
-        # Add all groups to options tab layout
-        options_tab_layout.addWidget(advanced_group)
-        options_tab_layout.addWidget(filtering_group)
-        options_tab_layout.addWidget(output_group)
         options_tab_layout.addWidget(performance_group)
-        options_tab_layout.addStretch()
 
-        self.options_tab.setLayout(options_tab_layout)
+        options_tab_layout.addStretch()
+        scroll.setWidget(scroll_content)
+        
+        tab_main_layout = QVBoxLayout()
+        tab_main_layout.addWidget(scroll)
+        tab_main_layout.setContentsMargins(0,0,0,0)
+        self.options_tab.setLayout(tab_main_layout)
+        
         self.tabs.addTab(self.options_tab, 'Options')
 
         # GCP tab (moved to 3rd position)
@@ -746,7 +686,7 @@ class ODMDialog(QDialog):
         # WebODM Preset Configurations
         presets = {
             'Default': {
-                'feature_extraction': 'medium',
+                'feature_extraction': 'high',
                 'camera_lens': 'auto',
                 'quality': 50,
                 'dsm': True,
@@ -757,7 +697,7 @@ class ODMDialog(QDialog):
                 'pointcloud_density': 'medium',
                 'outlier_removal': False,
                 'deviation': 5,
-                'resolution': 24,
+                'resolution': 5,
                 'tile_size': '2048',
                 'texture_mesh': True,
                 'generate_video': False,
@@ -777,7 +717,7 @@ class ODMDialog(QDialog):
                 'pointcloud_density': 'high',
                 'outlier_removal': False,
                 'deviation': 5,
-                'resolution': 12,
+                'resolution': 2,
                 'tile_size': '2048',
                 'texture_mesh': True,
                 'generate_video': False,
@@ -797,7 +737,7 @@ class ODMDialog(QDialog):
                 'pointcloud_density': 'low',
                 'outlier_removal': False,
                 'deviation': 5,
-                'resolution': 48,
+                'resolution': 20,
                 'tile_size': '4096',
                 'texture_mesh': False,
                 'generate_video': False,
@@ -981,7 +921,12 @@ class ODMDialog(QDialog):
                 options['pc-filter'] = str(self.deviation_spin.value())
             
             # Output options
-            options['mesh-size'] = self.tile_combo.currentText()
+            # NOTE: tile_combo (labeled "Tile Size") was previously incorrectly mapped to 'mesh-size'.
+            # mesh-size should default to 200000 for good quality.
+            # If tile_combo is meant for tiling, we'd use 'tiles': True and maybe other params, but 
+            # for now we'll disable the mesh-size override to fix the low-poly mesh issue.
+            # options['mesh-size'] = self.tile_combo.currentText() 
+            
             if self.texture_checkbox.isChecked():
                 options['textured-mesh'] = True
             if self.report_checkbox.isChecked():
