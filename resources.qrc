@@ -1,5 +1,5 @@
 <RCC>
     <qresource prefix="/plugins/odm_frontend">
-        <file>icon.png</file>
+        <file>drone.svg</file>
     </qresource>
 </RCC>

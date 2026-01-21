@@ -4,6 +4,7 @@ from qgis.PyQt.QtWidgets import QAction, QMessageBox
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import QgsProject
 from .odm_dialog import ODMDialog
+from . import resources_rc
 
 class ODMPlugin:
     def __init__(self, iface):
@@ -12,11 +13,8 @@ class ODMPlugin:
         self.action = None
         
     def initGui(self):
-        icon_path = os.path.join(self.plugin_dir, 'icon.png')
-        if os.path.exists(icon_path):
-            self.action = QAction(QIcon(icon_path), 'ODM Frontend', self.iface.mainWindow())
-        else:
-            self.action = QAction('ODM Frontend', self.iface.mainWindow())
+        # Use custom drone icon
+        self.action = QAction(QIcon(":/plugins/odm_frontend/drone.svg"), 'ODM Frontend', self.iface.mainWindow())
         
         self.action.triggered.connect(self.run)
         self.iface.addPluginToMenu('ODM Frontend', self.action)
