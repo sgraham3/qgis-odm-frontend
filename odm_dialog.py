@@ -1,16 +1,499 @@
 # -*- coding: utf-8 -*-
 import os
-from qgis.PyQt.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-                                 QLineEdit, QPushButton, QTabWidget, QWidget,
-                                 QGroupBox, QListWidget, QFileDialog, QMessageBox,
-                                 QProgressBar, QTextEdit, QCheckBox, QComboBox,
-                                 QSpinBox, QDialogButtonBox, QFormLayout, QSizePolicy, 
-                                 QGridLayout, QScrollArea, QMenu, QAction)
-from qgis.PyQt.QtCore import QThread, pyqtSignal, QTimer, Qt
+from qgis.PyQt.QtWidgets import (QDockWidget, QVBoxLayout, QHBoxLayout, QLabel,
+                                  QLineEdit, QPushButton, QTabWidget, QWidget,
+                                  QGroupBox, QListWidget, QFileDialog, QMessageBox,
+                                  QTextEdit, QCheckBox, QComboBox,
+                                  QSpinBox, QDialogButtonBox, QFormLayout, QSizePolicy,
+                                  QGridLayout, QScrollArea, QMenu, QAction, QDialog, QSizePolicy, QFrame)
+from qgis.PyQt.QtCore import QThread, pyqtSignal, QTimer, Qt, QEvent
 from qgis.core import QgsProject
 from .odm_connection import ODMConnection
 
-class ODMDialog(QDialog):
+
+class PhotosDock(QDockWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_dialog = parent  # Reference to ODMDialog
+        self.image_paths = []
+        self.current_image_index = -1
+        self.thumbnail_size = 120  # Smaller base thumbnail size for better loading
+        self.loaded_thumbnails = 0  # Track loaded thumbnails for progress
+        self.batch_size = 20  # Load thumbnails in batches
+        self.loading_dialog = None
+        self.images_first_loaded = False  # Track if images have been loaded before
+        self.setObjectName('odm_photos_dock')
+        self.setWindowTitle('ODM Photos')
+        self.setMinimumWidth(300)
+        self.setMinimumHeight(250)
+        # Allow free resizing
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        # Create central widget
+        central_widget = QWidget()
+        self.setWidget(central_widget)
+
+        # Main layout
+        layout = QVBoxLayout(central_widget)
+        layout.setSizeConstraint(QVBoxLayout.SetNoConstraint)
+
+        # Compact header with hamburger menu
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(QLabel('Photos'))
+        header_layout.addStretch()
+
+        # Hamburger menu button
+        self.menu_btn = QPushButton('☰')
+        self.menu_btn.setFixedWidth(30)
+        self.menu_btn.setFixedHeight(25)
+        self.menu_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #007bff;
+                border: none;
+                font-size: 16px;
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                color: #0056b3;
+                background-color: #f0f0f0;
+            }
+        """)
+        self.menu_btn.setToolTip('Photo options')
+        self.create_menu()
+        header_layout.addWidget(self.menu_btn)
+
+        layout.addLayout(header_layout)
+
+        # Image display area with scroll area (expanded space)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        self.image_container = QWidget()
+        self.image_layout = QGridLayout(self.image_container)
+        self.image_layout.setAlignment(Qt.AlignTop)
+        self.image_layout.setSpacing(8)
+        self.image_layout.setContentsMargins(8, 8, 8, 8)
+
+        # Ensure container can expand
+        self.image_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        self.scroll_area.setWidget(self.image_container)
+        self.scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Connect scroll event to load more images when nearing bottom
+        self.scroll_area.verticalScrollBar().valueChanged.connect(self.on_scroll)
+        layout.addWidget(self.scroll_area)
+
+
+
+    def create_menu(self):
+        """Create the hamburger menu with photo options"""
+        self.photo_menu = QMenu(self)
+
+        # Rotate left
+        rotate_left_action = QAction('↺ Rotate Left', self)
+        rotate_left_action.triggered.connect(self.rotate_left)
+        self.photo_menu.addAction(rotate_left_action)
+
+        # Rotate right
+        rotate_right_action = QAction('↻ Rotate Right', self)
+        rotate_right_action.triggered.connect(self.rotate_right)
+        self.photo_menu.addAction(rotate_right_action)
+
+        self.photo_menu.addSeparator()
+
+        # Remove selected
+        remove_action = QAction('🗑️ Remove Selected', self)
+        remove_action.triggered.connect(self.remove_image)
+        self.photo_menu.addAction(remove_action)
+
+        self.photo_menu.addSeparator()
+
+        # Fit to window
+        fit_action = QAction('🔍 Fit to Window', self)
+        fit_action.triggered.connect(self.fit_to_window)
+        self.photo_menu.addAction(fit_action)
+
+        # Connect menu to button
+        self.menu_btn.setMenu(self.photo_menu)
+
+        # Initially disable selection-dependent actions
+        self.enable_menu_actions(False)
+
+    def enable_menu_actions(self, enabled):
+        """Enable/disable menu actions based on selection"""
+        for action in self.photo_menu.actions():
+            if action.text() in ['↺ Rotate Left', '↻ Rotate Right', '🗑️ Remove Selected']:
+                action.setEnabled(enabled)
+
+    def set_image_paths(self, image_paths):
+        """Set the list of image paths to display with lazy loading"""
+        # Check if images actually changed
+        images_changed = self.image_paths != image_paths
+        self.image_paths = image_paths.copy()
+
+        # Only show loading dialog on first significant load of images
+        should_show_loading = len(self.image_paths) > 20 and not self.images_first_loaded
+        if should_show_loading:
+            self.show_loading_dialog()
+            self.images_first_loaded = True
+
+        # Only refresh display if images changed or nothing is loaded yet
+        if images_changed or self.loaded_thumbnails == 0:
+            self.refresh_image_display()
+
+        if self.image_paths:
+            self.current_image_index = -1  # No initial selection
+            self.enable_menu_actions(False)
+
+    def show_loading_dialog(self):
+        """Show a loading dialog for image processing"""
+        from qgis.PyQt.QtWidgets import QProgressDialog
+        self.loading_dialog = QProgressDialog("Loading image thumbnails...", "Cancel", 0, 100, self)
+        self.loading_dialog.setWindowModality(Qt.WindowModal)
+        self.loading_dialog.setMinimumDuration(500)  # Show after 500ms
+        self.loading_dialog.setValue(5)  # Initial progress
+        self.loading_dialog.show()  # Disable menu actions until selection
+
+    def refresh_image_display(self):
+        """Refresh the image thumbnails display with lazy loading"""
+        # Clear existing images
+        for i in reversed(range(self.image_layout.count())):
+            widget = self.image_layout.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+
+        self.loaded_thumbnails = 0
+
+        # Reset first load flag if no images
+        if not self.image_paths:
+            self.images_first_loaded = False
+
+        # If no images, nothing to do
+        if not self.image_paths:
+            return
+
+        # Calculate columns based on dock width and thumbnail size
+        dock_width = self.width()
+        margin_space = 60  # Account for margins and scrollbars
+        available_width = max(200, dock_width - margin_space)
+        self.cols = max(2, available_width // (self.thumbnail_size + 20))  # Minimum 2 columns, 20px spacing
+        print(f"Dock width: {dock_width}, Available: {available_width}, Thumbnail size: {self.thumbnail_size}, Columns: {self.cols}")  # Debug
+
+        # Load first batch immediately
+        self.load_next_batch()
+
+    def load_next_batch(self):
+        """Load the next batch of image thumbnails"""
+        if self.loaded_thumbnails >= len(self.image_paths):
+            # All images loaded, close loading dialog
+            if hasattr(self, 'loading_dialog') and self.loading_dialog:
+                self.loading_dialog.setValue(100)
+                self.loading_dialog.close()
+            return
+
+        # For now, load all images at once to test basic functionality
+        # Calculate batch range
+        start_idx = self.loaded_thumbnails
+        end_idx = len(self.image_paths)  # Load all remaining
+
+        # Load this batch
+        for i in range(start_idx, end_idx):
+            try:
+                # Create thumbnail widget
+                thumbnail_widget = self.create_image_thumbnail(self.image_paths[i], i)
+                row = i // self.cols
+                col = i % self.cols
+                self.image_layout.addWidget(thumbnail_widget, row, col)
+                print(f"Added image {i} at grid position ({row}, {col})")  # Debug
+            except Exception as e:
+                print(f"Error loading image {self.image_paths[i]}: {e}")
+
+        self.loaded_thumbnails = end_idx
+
+        # Update progress dialog
+        if hasattr(self, 'loading_dialog') and self.loading_dialog:
+            self.loading_dialog.setValue(100)
+            self.loading_dialog.close()  # Load next batch after 50ms
+
+    def create_image_thumbnail(self, image_path, index):
+        """Create a thumbnail widget for an image"""
+        from qgis.PyQt.QtGui import QPixmap, QImage
+
+        # Create a simple widget with basic styling
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(2)
+
+        # Load and scale image
+        pixmap = QPixmap(image_path)
+        if pixmap.isNull():
+            # If image fails to load, show a placeholder
+            image_label = QLabel("Image Load Error")
+            image_label.setAlignment(Qt.AlignCenter)
+            image_label.setStyleSheet("color: red; font-size: 10px;")
+        else:
+            # Scale to current thumbnail size
+            scaled_pixmap = pixmap.scaled(self.thumbnail_size, self.thumbnail_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            image_label = QLabel()
+            image_label.setPixmap(scaled_pixmap)
+            image_label.setAlignment(Qt.AlignCenter)
+
+        layout.addWidget(image_label)
+
+        # Filename label
+        filename_label = QLabel(os.path.basename(image_path))
+        filename_label.setAlignment(Qt.AlignCenter)
+        filename_label.setStyleSheet("font-size: 8px; color: #666;")
+        filename_label.setWordWrap(True)
+        layout.addWidget(filename_label)
+
+        # Make clickable with minimal styling
+        widget.mousePressEvent = lambda event, idx=index: self.select_image(idx)
+        widget.setStyleSheet("""
+            QWidget {
+                border: 1px solid transparent;
+                background-color: transparent;
+                margin: 3px;
+            }
+            QWidget:hover {
+                border: 1px solid #0078d4;
+                background-color: rgba(0, 120, 212, 0.05);
+            }
+        """)
+
+        return widget
+
+    def select_image(self, index):
+        """Select an image for operations"""
+        self.current_image_index = index
+
+        # Enable/disable menu actions
+        self.enable_menu_actions(index >= 0)
+
+        # Highlight selected image
+        for i in range(self.image_layout.count()):
+            widget = self.image_layout.itemAt(i).widget()
+            if i == index:
+                widget.setStyleSheet("""
+                    QWidget {
+                        border: 2px solid #0078d4;
+                        background-color: rgba(0, 120, 212, 0.1);
+                        margin: 3px;
+                    }
+                """)
+            else:
+                widget.setStyleSheet("""
+                    QWidget {
+                        border: 1px solid transparent;
+                        background-color: transparent;
+                        margin: 3px;
+                    }
+                    QWidget:hover {
+                        border: 1px solid #0078d4;
+                        background-color: rgba(0, 120, 212, 0.05);
+                    }
+                """)
+
+
+
+    def rotate_left(self):
+        """Rotate current image left (90 degrees counter-clockwise)"""
+        if 0 <= self.current_image_index < len(self.image_paths):
+            self._rotate_image(-90)
+
+    def rotate_right(self):
+        """Rotate current image right (90 degrees clockwise)"""
+        if 0 <= self.current_image_index < len(self.image_paths):
+            self._rotate_image(90)
+
+    def _rotate_image(self, angle):
+        """Rotate the current image by the given angle"""
+        from qgis.PyQt.QtGui import QPixmap, QImage, QTransform
+
+        image_path = self.image_paths[self.current_image_index]
+        
+        try:
+            # Load the image
+            image = QImage(image_path)
+            if image.isNull():
+                QMessageBox.warning(self, 'Error', f'Failed to load image: {os.path.basename(image_path)}')
+                return
+
+            # Create transform and rotate
+            transform = QTransform()
+            transform.rotate(angle)
+            rotated_image = image.transformed(transform, Qt.SmoothTransformation)
+
+            # Save the rotated image back to the same file
+            if rotated_image.save(image_path):
+                # Refresh the thumbnail display
+                self.refresh_image_display()
+                # Re-select the image
+                if self.current_image_index < self.image_layout.count():
+                    self.select_image(self.current_image_index)
+            else:
+                QMessageBox.warning(self, 'Error', f'Failed to save rotated image: {os.path.basename(image_path)}')
+        except Exception as e:
+            QMessageBox.critical(self, 'Error', f'Failed to rotate image: {str(e)}')
+
+    def remove_image(self):
+        """Remove current image from project"""
+        if 0 <= self.current_image_index < len(self.image_paths):
+            image_path = self.image_paths[self.current_image_index]
+            reply = QMessageBox.question(
+                self, 'Remove Image',
+                f'Are you sure you want to remove "{os.path.basename(image_path)}" from the project?',
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                # Remove from list
+                self.image_paths.pop(self.current_image_index)
+                # Notify parent dialog to update
+                if self.parent_dialog:
+                    self.parent_dialog.image_paths = self.image_paths.copy()
+                    self.parent_dialog.update_images_display()
+                # Refresh display
+                self.refresh_image_display()
+                # Update selection
+                if self.image_paths:
+                    if self.current_image_index >= len(self.image_paths):
+                        self.current_image_index = len(self.image_paths) - 1
+                    self.select_image(self.current_image_index)
+                else:
+                    self.current_image_index = -1
+
+    def fit_to_window(self):
+        """Fit images to window width"""
+        # TODO: Implement fit to window
+        QMessageBox.information(self, 'Fit', 'Fit to window functionality would be implemented here')
+
+    def on_scroll(self, value):
+        """Handle scroll events to load more images when nearing bottom"""
+        scrollbar = self.scroll_area.verticalScrollBar()
+        max_value = scrollbar.maximum()
+        current_value = scrollbar.value()
+
+        # Load more images when user scrolls to within 100px of bottom
+        if max_value - current_value < 100 and self.loaded_thumbnails < len(self.image_paths):
+            self.load_next_batch()
+
+    def resizeEvent(self, event):
+        """Handle resize events to update thumbnail sizes and grid layout"""
+        super().resizeEvent(event)
+
+        # Only refresh if we have images
+        if self.image_paths:
+            dock_width = self.width()
+            margin_space = 80  # Account for margins, scrollbars, and spacing
+            available_width = max(250, dock_width - margin_space)
+
+            # Calculate optimal thumbnail size and columns
+            min_thumb_size = 70
+            max_thumb_size = 160
+
+            # Try different column counts to find best fit
+            best_cols = 1
+            best_size = min_thumb_size
+            best_fit_score = float('inf')
+
+            for cols in range(1, 9):  # Try 1 to 8 columns
+                # Calculate thumbnail size for this column count
+                thumb_size = (available_width // cols) - 8  # 8px spacing
+                thumb_size = max(min_thumb_size, min(max_thumb_size, thumb_size))
+
+                # Calculate total width used
+                total_width = cols * (thumb_size + 8)
+                # Score how well it fits (lower is better)
+                fit_score = abs(available_width - total_width)
+
+                if fit_score < best_fit_score:
+                    best_fit_score = fit_score
+                    best_cols = cols
+                    best_size = thumb_size
+
+            # Update if changed significantly
+            if abs(best_size - self.thumbnail_size) > 10:
+                self.thumbnail_size = best_size
+                self.cols = best_cols
+                # Force refresh with new layout
+                self.refresh_image_display()
+
+
+class ConnectionDialog(QDialog):
+    def __init__(self, odm_connection, parent=None):
+        super().__init__(parent)
+        self.odm = odm_connection
+        self.setWindowTitle('ODM Connection Settings')
+        self.setModal(True)
+        self.setFixedSize(300, 150)
+
+        layout = QVBoxLayout()
+
+        # URL input
+        url_layout = QHBoxLayout()
+        url_layout.addWidget(QLabel('URL:'))
+        self.url_edit = QLineEdit(self.odm.base_url)
+        self.url_edit.setPlaceholderText('http://localhost:3000')
+        url_layout.addWidget(self.url_edit)
+        layout.addLayout(url_layout)
+
+        # Token input
+        token_layout = QHBoxLayout()
+        token_layout.addWidget(QLabel('Token:'))
+        self.token_edit = QLineEdit(self.odm.token)
+        self.token_edit.setPlaceholderText('Authentication token (optional)')
+        token_layout.addWidget(self.token_edit)
+        layout.addLayout(token_layout)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        test_btn = QPushButton('Test')
+        test_btn.clicked.connect(self.test_connection)
+        save_btn = QPushButton('Save')
+        save_btn.clicked.connect(self.save_connection)
+        cancel_btn = QPushButton('Cancel')
+        cancel_btn.clicked.connect(self.reject)
+
+        button_layout.addWidget(test_btn)
+        button_layout.addWidget(save_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def test_connection(self):
+        url = self.url_edit.text().strip()
+        if not url:
+            QMessageBox.warning(self, 'Connection', 'Please enter a URL for the ODM server.')
+            return
+
+        if not url.startswith('http://') and not url.startswith('https://'):
+            url = 'http://' + url
+            self.url_edit.setText(url)
+
+        token = self.token_edit.text().strip()
+        self.odm.set_credentials(url, token)
+
+        if self.odm.test_connection():
+            QMessageBox.information(self, 'Connection', f'Successfully connected to ODM server at {url}!')
+        else:
+            QMessageBox.critical(self, 'Connection', f'Failed to connect to ODM server at {url}.\n\nPlease check:\n1. URL is correct (e.g., http://localhost:3000)\n2. ODM server is running\n3. No firewall blocking the connection')
+
+    def save_connection(self):
+        url = self.url_edit.text().strip()
+        token = self.token_edit.text().strip()
+        if url and not url.startswith('http://') and not url.startswith('https://'):
+            url = 'http://' + url
+        self.odm.set_credentials(url, token)
+        self.accept()
+
+
+class ODMDialog(QDockWidget):
     def __init__(self, iface):
         super().__init__()
         self.iface = iface
@@ -24,25 +507,32 @@ class ODMDialog(QDialog):
         
     def init_ui(self):
         self.setWindowTitle('ODM Frontend')
-        self.setGeometry(200, 200, 600, 550)  # Compact size
-        self.setMinimumSize(500, 450)
+        self.setMinimumWidth(350)
+        self.setMaximumWidth(450)
+        # Handle close event to hide instead of close
+        self.setAttribute(Qt.WA_DeleteOnClose, False)
+
+        # Create central widget for dock
+        central_widget = QWidget()
+        self.setWidget(central_widget)
 
         # Main Layout
         layout = QVBoxLayout()
-        layout.setContentsMargins(5, 5, 5, 5)
-        
-        # --- TOP BAR (Hamburger + Connection) ---
-        top_bar_layout = QHBoxLayout()
-        
-        # Hamburger Menu Button
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(1)
+
+        # Tab widget
+        self.tabs = QTabWidget()
+
+        # Hamburger Menu Button (corner widget inline with tabs)
         self.menu_btn = QPushButton('☰')
         self.menu_btn.setFixedWidth(30)
         self.menu_btn.setStyleSheet("""
             QPushButton {
-                background-color: transparent; 
-                color: #007bff; 
-                border: none; 
-                font-size: 20px; 
+                background-color: transparent;
+                color: #007bff;
+                border: none;
+                font-size: 16px;
                 font-weight: bold;
                 padding: 0px;
             }
@@ -52,131 +542,228 @@ class ODMDialog(QDialog):
             }
         """)
         self.menu_btn.setToolTip('Project Menu')
-        
+
         # Build the menu
         self.project_menu = QMenu(self)
+        connection_action = QAction('🔗 Connection', self)
+        connection_action.triggered.connect(self.show_connection_dialog)
         open_action = QAction('📂 Open Project', self)
         open_action.triggered.connect(self.open_project)
         save_action = QAction('💾 Save Project', self)
         save_action.triggered.connect(self.save_project)
+        self.project_menu.addAction(connection_action)
+        self.project_menu.addSeparator()
         self.project_menu.addAction(open_action)
         self.project_menu.addAction(save_action)
-        
+
         # Connect button to show menu
         self.menu_btn.setMenu(self.project_menu)
-        
-        # Connection Controls
-        self.url_edit = QLineEdit(self.odm.base_url)
-        self.url_edit.setPlaceholderText('http://localhost:3000')
-        self.url_edit.setToolTip('ODM/NodeODM server URL')
 
-        self.token_edit = QLineEdit(self.odm.token)
-        self.token_edit.setPlaceholderText('Token')
-        self.token_edit.setToolTip('Authentication token (optional)')
+        # Place hamburger menu in top-right corner of tab bar
+        self.tabs.setCornerWidget(self.menu_btn)
 
-        connect_btn = QPushButton('Test')
-        connect_btn.clicked.connect(self.test_connection)
-        connect_btn.setToolTip('Test connection')
-        
-        top_bar_layout.addWidget(self.menu_btn)
-        top_bar_layout.addWidget(self.url_edit)
-        top_bar_layout.addWidget(self.token_edit)
-        top_bar_layout.addWidget(connect_btn)
-        
-        layout.addLayout(top_bar_layout)
-        
-        # Tab widget
-        self.tabs = QTabWidget()
-        
-        # Processing tab
+        # Processing tab - Professional style matching options tab
         self.processing_tab = QWidget()
-        processing_layout = QVBoxLayout()
-        
-        # Images upload
-        images_group = QGroupBox('Images')
-        images_layout = QVBoxLayout()
-        
-        self.images_list = QListWidget()
-        self.images_list.itemClicked.connect(self.select_project)
-        self.images_list.setToolTip('List of uploaded drone images')
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_content = QWidget()
+        processing_layout = QVBoxLayout(scroll_content)
+        processing_layout.setSpacing(5)
+        processing_layout.setContentsMargins(5, 5, 5, 5)
 
-        images_btn_layout = QHBoxLayout()
-        add_images_btn = QPushButton('Add Images')
-        add_images_btn.clicked.connect(self.add_images)
-        
-        clear_images_btn = QPushButton('Clear')
-        clear_images_btn.clicked.connect(self.clear_images)
-        
-        images_btn_layout.addWidget(add_images_btn)
-        images_btn_layout.addWidget(clear_images_btn)
-        
-        images_layout.addWidget(self.images_list)
-        images_layout.addLayout(images_btn_layout)
-        images_group.setLayout(images_layout)
-        
-        # Task Settings (Simplified)
-        options_group = QGroupBox('Task Settings')
-        options_grid = QGridLayout()
-        options_grid.setContentsMargins(5, 5, 5, 5)
+        # Project Settings Group
+        project_group = QGroupBox('Project Settings')
+        project_grid = QGridLayout()
+        project_grid.setContentsMargins(5, 5, 5, 5)
+        project_grid.setSpacing(3)
 
-        # WebODM Field Presets
-        options_grid.addWidget(QLabel('Preset:'), 0, 0)
+        project_grid.addWidget(QLabel('Processing Preset:'), 0, 0)
         self.preset_combo = QComboBox()
         self.preset_combo.addItems([
-            'Custom', 'Default', 'High Resolution', 'Fast Orthophoto',
-            'Field', 'DSM+DTM', '3D Model'
+            'Default', 'High Resolution', 'Fast Orthophoto',
+            'Field', 'DSM+DTM', '3D Model', 'Custom'
         ])
         self.preset_combo.setCurrentText('Default')
         self.preset_combo.currentTextChanged.connect(self.apply_preset)
-        self.preset_combo.setToolTip('Processing preset')
-        options_grid.addWidget(self.preset_combo, 0, 1)
-        
-        # Basic Toggles
+        self.preset_combo.setToolTip('Choose a processing preset for your project')
+        self.preset_combo.setMaximumWidth(180)
+        project_grid.addWidget(self.preset_combo, 0, 1)
+
+        project_group.setLayout(project_grid)
+        processing_layout.addWidget(project_group)
+
+        # Output Options Group
+        output_group = QGroupBox('Output Products')
+        output_layout = QVBoxLayout()
+        output_layout.setContentsMargins(5, 5, 5, 5)
+        output_layout.setSpacing(3)
+
+        output_desc = QLabel('Select outputs:')
+        output_desc.setStyleSheet("font-size: 11px; color: #666;")
+        output_layout.addWidget(output_desc)
+
         checkbox_layout = QHBoxLayout()
-        self.dsm_checkbox = QCheckBox('DSM')
-        self.dtm_checkbox = QCheckBox('DTM')
+        checkbox_layout.setSpacing(8)
         self.orthophoto_checkbox = QCheckBox('Orthophoto')
         self.orthophoto_checkbox.setChecked(True)
-        
+        self.orthophoto_checkbox.setToolTip('Generate georeferenced orthophoto mosaic')
+
+        self.dsm_checkbox = QCheckBox('DSM')
+        self.dsm_checkbox.setToolTip('Generate Digital Surface Model (surface elevation including buildings/vegetation)')
+
+        self.dtm_checkbox = QCheckBox('DTM')
+        self.dtm_checkbox.setToolTip('Generate Digital Terrain Model (ground elevation only - includes automatic point cloud classification)')
+
+        checkbox_layout.addWidget(self.orthophoto_checkbox)
         checkbox_layout.addWidget(self.dsm_checkbox)
         checkbox_layout.addWidget(self.dtm_checkbox)
-        checkbox_layout.addWidget(self.orthophoto_checkbox)
-        options_grid.addLayout(checkbox_layout, 1, 0, 1, 2)
+        checkbox_layout.addStretch()
 
-        options_group.setLayout(options_grid)
+        output_layout.addLayout(checkbox_layout)
+        output_group.setLayout(output_layout)
+        processing_layout.addWidget(output_group)
+
+        # Input Images Group
+        images_group = QGroupBox('Input Images')
+        images_layout = QVBoxLayout()
+        images_layout.setContentsMargins(5, 5, 5, 5)
+        images_layout.setSpacing(3)
+
+        # Compact images info and count
+        info_layout = QHBoxLayout()
+        info_layout.addWidget(QLabel('Images:'))
+
+        self.images_count_label = QLabel('0')
+        self.images_count_label.setStyleSheet("font-weight: bold; color: #007bff;")
+        info_layout.addWidget(self.images_count_label)
+        info_layout.addStretch()
+        images_layout.addLayout(info_layout)
+
+        # Compact action buttons
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(3)
+
+        self.add_images_btn = QPushButton('📁 Add')
+        self.add_images_btn.setMaximumWidth(70)
+        self.add_images_btn.setToolTip('Select and upload drone images for processing')
         
-        # Processing controls
-        process_btn_layout = QHBoxLayout()
-        self.start_task_btn = QPushButton('▶️ Create Task & Start Processing')
-        self.start_task_btn.clicked.connect(self.start_task_processing)
-        self.start_task_btn.setStyleSheet("font-weight: bold; padding: 5px;")
+        # Create dropdown menu for Add button
+        self.add_menu = QMenu(self)
+        add_files_action = QAction('Add Files', self)
+        add_files_action.triggered.connect(self.add_images_from_files)
+        add_dir_action = QAction('Add Directory', self)
+        add_dir_action.triggered.connect(self.add_images_from_directory)
+        self.add_menu.addAction(add_files_action)
+        self.add_menu.addAction(add_dir_action)
+        self.add_images_btn.setMenu(self.add_menu)
 
-        self.stop_task_btn = QPushButton('⏹️ Stop')
+        clear_images_btn = QPushButton('🗑️ Clear')
+        clear_images_btn.setMaximumWidth(70)
+        clear_images_btn.clicked.connect(self.clear_images)
+        clear_images_btn.setToolTip('Remove all uploaded images')
+
+        button_layout.addWidget(self.add_images_btn)
+        button_layout.addWidget(clear_images_btn)
+        button_layout.addStretch()
+
+        images_layout.addLayout(button_layout)
+        images_group.setLayout(images_layout)
+        processing_layout.addWidget(images_group)
+
+        # Processing Control Group
+        control_group = QGroupBox('Processing Control')
+        control_layout = QVBoxLayout()
+        control_layout.setContentsMargins(5, 5, 5, 5)
+        control_layout.setSpacing(3)
+
+        # Main action buttons - compact
+        button_grid = QHBoxLayout()
+        button_grid.setSpacing(5)
+
+        self.start_task_btn = QPushButton('🚀 Start')
+        self.start_task_btn.clicked.connect(self.start_task_processing)
+        self.start_task_btn.setEnabled(False)
+        self.start_task_btn.setStyleSheet("""
+            QPushButton {
+                font-weight: bold;
+                font-size: 11px;
+                padding: 6px 12px;
+                background-color: #28a745;
+                color: white;
+                border: none;
+                border-radius: 3px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+            QPushButton:disabled {
+                background-color: #6c757d;
+            }
+        """)
+
+        self.stop_task_btn = QPushButton('🛑 Stop')
         self.stop_task_btn.clicked.connect(self.stop_task)
         self.stop_task_btn.setEnabled(False)
+        self.stop_task_btn.setStyleSheet("""
+            QPushButton {
+                font-weight: bold;
+                font-size: 11px;
+                padding: 6px 12px;
+                background-color: #dc3545;
+                color: white;
+                border: none;
+                border-radius: 3px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #c82333;
+            }
+            QPushButton:disabled {
+                background-color: #6c757d;
+            }
+        """)
 
-        process_btn_layout.addWidget(self.start_task_btn)
-        process_btn_layout.addWidget(self.stop_task_btn)
+        button_grid.addWidget(self.start_task_btn)
+        button_grid.addWidget(self.stop_task_btn)
+        button_grid.addStretch()
 
-        self.progress_bar = QProgressBar()
-        status_label = QLabel('Status:')
+        control_layout.addLayout(button_grid)
+        control_group.setLayout(control_layout)
+        processing_layout.addWidget(control_group)
+
+        # Status Group
+        status_group = QGroupBox('Processing Status')
+        status_layout = QVBoxLayout()
+        status_layout.setContentsMargins(5, 5, 5, 5)
+        status_layout.setSpacing(3)
 
         self.status_text = QTextEdit()
+        self.status_text.setMinimumHeight(50)
         self.status_text.setMaximumHeight(80)
         self.status_text.setReadOnly(True)
+        self.status_text.setStyleSheet("""
+            QTextEdit {
+                font-family: 'Courier New', monospace;
+                font-size: 8px;
+                background-color: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 2px;
+            }
+        """)
+        status_layout.addWidget(self.status_text)
 
-        processing_layout.addWidget(images_group, 1)
-        processing_layout.addWidget(options_group, 0)
-        processing_layout.addLayout(process_btn_layout)
-        
-        status_layout = QHBoxLayout()
-        status_layout.addWidget(status_label)
-        status_layout.addWidget(self.progress_bar)
-        processing_layout.addLayout(status_layout)
-        
-        processing_layout.addWidget(self.status_text)
-        
-        self.processing_tab.setLayout(processing_layout)
+        status_group.setLayout(status_layout)
+        processing_layout.addWidget(status_group)
+
+        # Add stretch to push everything to top
+        processing_layout.addStretch()
+
+        scroll.setWidget(scroll_content)
+        tab_layout = QVBoxLayout()
+        tab_layout.addWidget(scroll)
+        tab_layout.setContentsMargins(0,0,0,0)
+        self.processing_tab.setLayout(tab_layout)
         self.tabs.addTab(self.processing_tab, 'Processing')
 
         # --- OPTIONS TAB (All Options) ---
@@ -185,38 +772,46 @@ class ODMDialog(QDialog):
         scroll.setWidgetResizable(True)
         scroll_content = QWidget()
         options_tab_layout = QVBoxLayout(scroll_content)
-        options_tab_layout.setSpacing(10)
+        options_tab_layout.setSpacing(5)
+        options_tab_layout.setContentsMargins(5, 5, 5, 5)
 
         # Group 1: Camera & Reconstruction
         cam_group = QGroupBox('Camera & Reconstruction')
         cam_grid = QGridLayout()
+        cam_grid.setContentsMargins(5, 5, 5, 5)
+        cam_grid.setSpacing(3)
 
-        cam_grid.addWidget(QLabel('Feature Extraction:'), 0, 0)
+        cam_grid.addWidget(QLabel('Feature:'), 0, 0)
         self.feature_extraction_combo = QComboBox()
         self.feature_extraction_combo.addItems(['auto', 'high', 'medium', 'low'])
+        self.feature_extraction_combo.setMaximumWidth(80)
         cam_grid.addWidget(self.feature_extraction_combo, 0, 1)
 
-        cam_grid.addWidget(QLabel('Camera Lens:'), 0, 2)
+        cam_grid.addWidget(QLabel('Lens:'), 0, 2)
         self.camera_lens_combo = QComboBox()
         self.camera_lens_combo.addItems(['auto', 'perspective', 'fisheye', 'spherical'])
+        self.camera_lens_combo.setMaximumWidth(90)
         cam_grid.addWidget(self.camera_lens_combo, 0, 3)
 
-        cam_grid.addWidget(QLabel('Quality (1-100):'), 1, 0)
+        cam_grid.addWidget(QLabel('Quality:'), 1, 0)
         self.quality_spin = QSpinBox()
         self.quality_spin.setRange(1, 100)
         self.quality_spin.setValue(50)
+        self.quality_spin.setMaximumWidth(70)
         cam_grid.addWidget(self.quality_spin, 1, 1)
 
-        cam_grid.addWidget(QLabel('Reconstruction:'), 1, 2)
+        cam_grid.addWidget(QLabel('Recon:'), 1, 2)
         self.recon_combo = QComboBox()
         self.recon_combo.addItems(['high', 'medium', 'low'])
         self.recon_combo.setCurrentText('high')
+        self.recon_combo.setMaximumWidth(80)
         cam_grid.addWidget(self.recon_combo, 1, 3)
 
-        cam_grid.addWidget(QLabel('FOV (deg):'), 2, 0)
+        cam_grid.addWidget(QLabel('FOV:'), 2, 0)
         self.fov_spin = QSpinBox()
         self.fov_spin.setRange(1, 180)
         self.fov_spin.setValue(60)
+        self.fov_spin.setMaximumWidth(70)
         cam_grid.addWidget(self.fov_spin, 2, 1)
 
         cam_group.setLayout(cam_grid)
@@ -225,21 +820,26 @@ class ODMDialog(QDialog):
         # Group 2: Point Cloud & Filtering
         pc_group = QGroupBox('Point Cloud')
         pc_grid = QGridLayout()
+        pc_grid.setContentsMargins(5, 5, 5, 5)
+        pc_grid.setSpacing(3)
 
         pc_grid.addWidget(QLabel('Density:'), 0, 0)
         self.pc_density_combo = QComboBox()
         self.pc_density_combo.addItems(['high', 'medium', 'low'])
         self.pc_density_combo.setCurrentText('medium')
+        self.pc_density_combo.setMaximumWidth(80)
         pc_grid.addWidget(self.pc_density_combo, 0, 1)
 
-        pc_grid.addWidget(QLabel('Outlier Removal:'), 1, 0)
+        pc_grid.addWidget(QLabel('Outlier:'), 1, 0)
         filter_box = QHBoxLayout()
+        filter_box.setSpacing(3)
         self.outlier_checkbox = QCheckBox('Enable')
         filter_box.addWidget(self.outlier_checkbox)
-        filter_box.addWidget(QLabel('Deviation:'))
+        filter_box.addWidget(QLabel('Dev:'))
         self.deviation_spin = QSpinBox()
         self.deviation_spin.setRange(1, 50)
         self.deviation_spin.setValue(5)
+        self.deviation_spin.setMaximumWidth(60)
         filter_box.addWidget(self.deviation_spin)
         pc_grid.addLayout(filter_box, 1, 1)
 
@@ -249,21 +849,26 @@ class ODMDialog(QDialog):
         # Group 3: Outputs
         output_group = QGroupBox('Outputs')
         output_grid = QGridLayout()
+        output_grid.setContentsMargins(5, 5, 5, 5)
+        output_grid.setSpacing(3)
 
-        output_grid.addWidget(QLabel('Ortho Resolution (cm):'), 0, 0)
+        output_grid.addWidget(QLabel('Resolution:'), 0, 0)
         self.resolution_spin = QSpinBox()
         self.resolution_spin.setRange(1, 100)
         self.resolution_spin.setValue(5)
+        self.resolution_spin.setMaximumWidth(70)
         output_grid.addWidget(self.resolution_spin, 0, 1)
 
-        output_grid.addWidget(QLabel('Tile Size (px):'), 0, 2)
+        output_grid.addWidget(QLabel('Tile Size:'), 0, 2)
         self.tile_combo = QComboBox()
         self.tile_combo.addItems(['2048', '4096', '8192'])
         self.tile_combo.setCurrentText('2048')
+        self.tile_combo.setMaximumWidth(80)
         output_grid.addWidget(self.tile_combo, 0, 3)
 
         additional_layout = QHBoxLayout()
-        self.texture_checkbox = QCheckBox('Textured Mesh')
+        additional_layout.setSpacing(6)
+        self.texture_checkbox = QCheckBox('Mesh')
         self.texture_checkbox.setChecked(True)
         self.video_checkbox = QCheckBox('Video')
         self.video_checkbox.setChecked(False)
@@ -281,80 +886,97 @@ class ODMDialog(QDialog):
         # Group 4: Performance
         performance_group = QGroupBox('Performance')
         performance_layout = QHBoxLayout()
+        performance_layout.setContentsMargins(5, 5, 5, 5)
+        performance_layout.setSpacing(3)
         performance_layout.addWidget(QLabel('Threads:'))
         self.threads_spin = QSpinBox()
         self.threads_spin.setRange(0, 32)
         self.threads_spin.setValue(0)
+        self.threads_spin.setMaximumWidth(60)
         performance_layout.addWidget(self.threads_spin)
-        performance_layout.addWidget(QLabel('Memory (GB):'))
+        performance_layout.addWidget(QLabel('Memory:'))
         self.memory_spin = QSpinBox()
         self.memory_spin.setRange(1, 64)
         self.memory_spin.setValue(8)
+        self.memory_spin.setMaximumWidth(60)
         performance_layout.addWidget(self.memory_spin)
         performance_group.setLayout(performance_layout)
         options_tab_layout.addWidget(performance_group)
 
         options_tab_layout.addStretch()
         scroll.setWidget(scroll_content)
-        
+
         tab_main_layout = QVBoxLayout()
         tab_main_layout.addWidget(scroll)
         tab_main_layout.setContentsMargins(0,0,0,0)
         self.options_tab.setLayout(tab_main_layout)
-        
+
         self.tabs.addTab(self.options_tab, 'Options')
 
-        # GCP tab (moved to 3rd position)
+        # GCP tab - Ultra-compact styling
         self.gcp_tab = QWidget()
-        gcp_layout = QVBoxLayout()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_content = QWidget()
+        gcp_layout = QVBoxLayout(scroll_content)
+        gcp_layout.setSpacing(5)
+        gcp_layout.setContentsMargins(5, 5, 5, 5)
 
         # GCP file management
         gcp_file_group = QGroupBox('GCP File')
-        gcp_file_layout = QHBoxLayout()
+        gcp_file_layout = QVBoxLayout()
+        gcp_file_layout.setContentsMargins(5, 5, 5, 5)
+        gcp_file_layout.setSpacing(3)
 
         self.gcp_file_path = QLineEdit()
         self.gcp_file_path.setPlaceholderText('GCP file path (.txt or .csv)')
         self.gcp_file_path.setReadOnly(True)
-        self.gcp_file_path.setToolTip('Path to the currently loaded GCP file')
-
-        self.load_gcp_btn = QPushButton('Load GCP File')
-        self.load_gcp_btn.clicked.connect(self.load_gcp_file)
-        self.load_gcp_btn.setToolTip('Load existing GCP file (.txt or .csv format)')
-
-        self.save_gcp_btn = QPushButton('Save GCP File')
-        self.save_gcp_btn.clicked.connect(self.save_gcp_file)
-        self.save_gcp_btn.setToolTip('Save current GCP points to a file')
-
+        self.gcp_file_path.setMaximumHeight(25)
         gcp_file_layout.addWidget(self.gcp_file_path)
-        gcp_file_layout.addWidget(self.load_gcp_btn)
-        gcp_file_layout.addWidget(self.save_gcp_btn)
+
+        file_btn_layout = QHBoxLayout()
+        file_btn_layout.setSpacing(3)
+        self.load_gcp_btn = QPushButton('Load')
+        self.load_gcp_btn.setMaximumWidth(60)
+        self.load_gcp_btn.clicked.connect(self.load_gcp_file)
+        self.save_gcp_btn = QPushButton('Save')
+        self.save_gcp_btn.setMaximumWidth(60)
+        self.save_gcp_btn.clicked.connect(self.save_gcp_file)
+        file_btn_layout.addWidget(self.load_gcp_btn)
+        file_btn_layout.addWidget(self.save_gcp_btn)
+        file_btn_layout.addStretch()
+        gcp_file_layout.addLayout(file_btn_layout)
 
         gcp_file_group.setLayout(gcp_file_layout)
 
         # GCP point management
         gcp_points_group = QGroupBox('GCP Points')
         gcp_points_layout = QVBoxLayout()
+        gcp_points_layout.setContentsMargins(5, 5, 5, 5)
+        gcp_points_layout.setSpacing(3)
 
-        # GCP list
         self.gcp_list = QListWidget()
+        self.gcp_list.setMaximumHeight(80)
+        self.gcp_list.setMinimumHeight(50)
         self.gcp_list.itemClicked.connect(self.select_gcp_point)
-        self.gcp_list.setToolTip('List of all ground control points with coordinates')
+        gcp_points_layout.addWidget(self.gcp_list)
 
-        # GCP controls
+        # Compact GCP controls
         gcp_controls_layout = QHBoxLayout()
+        gcp_controls_layout.setSpacing(3)
 
-        self.add_gcp_btn = QPushButton('Add GCP Point')
+        self.add_gcp_btn = QPushButton('Add')
+        self.add_gcp_btn.setMaximumWidth(50)
         self.add_gcp_btn.clicked.connect(self.add_gcp_point)
-        self.add_gcp_btn.setToolTip('Add a new ground control point with coordinates')
 
-        self.edit_gcp_btn = QPushButton('Edit Selected')
+        self.edit_gcp_btn = QPushButton('Edit')
+        self.edit_gcp_btn.setMaximumWidth(50)
         self.edit_gcp_btn.clicked.connect(self.edit_gcp_point)
-        self.edit_gcp_btn.setToolTip('Modify the coordinates of the selected GCP point')
         self.edit_gcp_btn.setEnabled(False)
 
-        self.remove_gcp_btn = QPushButton('Remove Selected')
+        self.remove_gcp_btn = QPushButton('Del')
+        self.remove_gcp_btn.setMaximumWidth(50)
         self.remove_gcp_btn.clicked.connect(self.remove_gcp_point)
-        self.remove_gcp_btn.setToolTip('Delete the selected GCP point permanently')
         self.remove_gcp_btn.setEnabled(False)
 
         gcp_controls_layout.addWidget(self.add_gcp_btn)
@@ -362,161 +984,197 @@ class ODMDialog(QDialog):
         gcp_controls_layout.addWidget(self.remove_gcp_btn)
         gcp_controls_layout.addStretch()
 
-        gcp_points_layout.addWidget(self.gcp_list)
         gcp_points_layout.addLayout(gcp_controls_layout)
-
         gcp_points_group.setLayout(gcp_points_layout)
 
-        # GCP info display
-        gcp_info_group = QGroupBox('Point Information')
-        gcp_info_layout = QFormLayout()
+        # Compact GCP info display
+        gcp_info_group = QGroupBox('Point Info')
+        gcp_info_layout = QVBoxLayout()
+        gcp_info_layout.setContentsMargins(5, 5, 5, 5)
+        gcp_info_layout.setSpacing(2)
 
-        self.gcp_id_label = QLabel('ID: -')
-        self.gcp_id_label.setToolTip('Unique identifier for this ground control point')
+        info_grid = QGridLayout()
+        info_grid.setSpacing(2)
 
-        self.gcp_world_label = QLabel('World: -, -, -')
-        self.gcp_world_label.setToolTip('Real-world coordinates (X, Y, Z) in project coordinate system')
+        info_grid.addWidget(QLabel('ID:'), 0, 0)
+        self.gcp_id_label = QLabel('-')
+        info_grid.addWidget(self.gcp_id_label, 0, 1)
 
-        self.gcp_image_label = QLabel('Image: -, -')
-        self.gcp_image_label.setToolTip('Pixel coordinates (x, y) in the source image')
+        info_grid.addWidget(QLabel('World:'), 1, 0)
+        self.gcp_world_label = QLabel('-, -, -')
+        info_grid.addWidget(self.gcp_world_label, 1, 1)
 
-        self.gcp_filename_label = QLabel('File: -')
-        self.gcp_filename_label.setToolTip('Source image filename containing this GCP point')
+        info_grid.addWidget(QLabel('Image:'), 2, 0)
+        self.gcp_image_label = QLabel('-, -')
+        info_grid.addWidget(self.gcp_image_label, 2, 1)
 
-        self.gcp_name_label = QLabel('Name: -')
-        self.gcp_name_label.setToolTip('Optional name/label for this ground control point')
+        info_grid.addWidget(QLabel('File:'), 3, 0)
+        self.gcp_filename_label = QLabel('-')
+        info_grid.addWidget(self.gcp_filename_label, 3, 1)
 
-        gcp_info_layout.addRow('Point ID:', self.gcp_id_label)
-        gcp_info_layout.addRow('World Coordinates:', self.gcp_world_label)
-        gcp_info_layout.addRow('Image Coordinates:', self.gcp_image_label)
-        gcp_info_layout.addRow('Image File:', self.gcp_filename_label)
-        gcp_info_layout.addRow('GCP Name:', self.gcp_name_label)
+        info_grid.addWidget(QLabel('Name:'), 4, 0)
+        self.gcp_name_label = QLabel('-')
+        info_grid.addWidget(self.gcp_name_label, 4, 1)
 
+        gcp_info_layout.addLayout(info_grid)
         gcp_info_group.setLayout(gcp_info_layout)
 
         # Add all groups to GCP layout
         gcp_layout.addWidget(gcp_file_group)
         gcp_layout.addWidget(gcp_points_group)
         gcp_layout.addWidget(gcp_info_group)
+        gcp_layout.addStretch()
 
-        self.gcp_tab.setLayout(gcp_layout)
+        scroll.setWidget(scroll_content)
+        tab_layout = QVBoxLayout()
+        tab_layout.addWidget(scroll)
+        tab_layout.setContentsMargins(0,0,0,0)
+        self.gcp_tab.setLayout(tab_layout)
         self.tabs.addTab(self.gcp_tab, 'GCPs')
 
-        # Tasks tab (moved to 4th position)
+        # Tasks tab - Ultra-compact styling
         self.tasks_tab = QWidget()
-        tasks_layout = QVBoxLayout()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_content = QWidget()
+        tasks_layout = QVBoxLayout(scroll_content)
+        tasks_layout.setSpacing(5)
+        tasks_layout.setContentsMargins(5, 5, 5, 5)
 
-        # Task management buttons
+        # Compact task management
+        task_controls_group = QGroupBox('Task Controls')
         task_btn_layout = QHBoxLayout()
-        self.refresh_tasks_btn = QPushButton('🔄 Refresh Tasks')
-        self.refresh_tasks_btn.clicked.connect(self.load_projects)
-        self.refresh_tasks_btn.setToolTip('Update the list of tasks from the ODM server')
+        task_btn_layout.setContentsMargins(5, 5, 5, 5)
+        task_btn_layout.setSpacing(3)
 
-        self.delete_task_btn = QPushButton('🗑️ Delete Task')
+        self.refresh_tasks_btn = QPushButton('🔄 Refresh')
+        self.refresh_tasks_btn.setMaximumWidth(80)
+        self.refresh_tasks_btn.clicked.connect(self.load_projects)
+
+        self.delete_task_btn = QPushButton('🗑️ Delete')
+        self.delete_task_btn.setMaximumWidth(80)
         self.delete_task_btn.clicked.connect(self.delete_task)
-        self.delete_task_btn.setToolTip('Permanently delete the selected task and all its data')
         self.delete_task_btn.setEnabled(False)
 
         task_btn_layout.addWidget(self.refresh_tasks_btn)
         task_btn_layout.addWidget(self.delete_task_btn)
         task_btn_layout.addStretch()
+        task_controls_group.setLayout(task_btn_layout)
 
         # Active tasks list
         tasks_list_group = QGroupBox('Active Tasks')
-        tasks_list_group.setToolTip('List of all processing tasks - click to select and monitor')
         tasks_list_layout = QVBoxLayout()
+        tasks_list_layout.setContentsMargins(5, 5, 5, 5)
+        tasks_list_layout.setSpacing(3)
 
         self.projects_list = QListWidget()
+        self.projects_list.setMaximumHeight(120)
+        self.projects_list.setMinimumHeight(60)
         self.projects_list.itemClicked.connect(self.select_project)
-        self.projects_list.setMinimumHeight(200)
-        self.projects_list.setToolTip('Click on a task to select it for monitoring or deletion')
-
         tasks_list_layout.addWidget(self.projects_list)
         tasks_list_group.setLayout(tasks_list_layout)
 
-        tasks_layout.addLayout(task_btn_layout)
+        tasks_layout.addWidget(task_controls_group)
         tasks_layout.addWidget(tasks_list_group)
+        tasks_layout.addStretch()
 
-        self.tasks_tab.setLayout(tasks_layout)
+        scroll.setWidget(scroll_content)
+        tab_layout = QVBoxLayout()
+        tab_layout.addWidget(scroll)
+        tab_layout.setContentsMargins(0,0,0,0)
+        self.tasks_tab.setLayout(tab_layout)
         self.tabs.addTab(self.tasks_tab, 'Tasks')
 
-        # Results tab (moved to 4th position)
+        # Results tab - Ultra-compact styling
         self.results_tab = QWidget()
-        results_layout = QVBoxLayout()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_content = QWidget()
+        results_layout = QVBoxLayout(scroll_content)
+        results_layout.setSpacing(5)
+        results_layout.setContentsMargins(5, 5, 5, 5)
 
         # Task selection for Results tab
-        results_task_group = QGroupBox('Select Task to Monitor')
-        results_task_group.setToolTip('Choose which processing task to monitor and download results from')
+        results_task_group = QGroupBox('Task Selection')
         results_task_layout = QVBoxLayout()
+        results_task_layout.setContentsMargins(5, 5, 5, 5)
+        results_task_layout.setSpacing(3)
 
         self.results_task_combo = QComboBox()
         self.results_task_combo.addItem('No task selected', '')
         self.results_task_combo.currentIndexChanged.connect(self.select_results_task)
-        self.results_task_combo.setToolTip('Select a completed task to view status and download results')
-
-        task_label = QLabel('Choose a task to monitor:')
-        task_label.setToolTip('Pick a task from the dropdown to monitor its progress and results')
-
-        results_task_layout.addWidget(task_label)
         results_task_layout.addWidget(self.results_task_combo)
         results_task_group.setLayout(results_task_layout)
 
+        # Compact action buttons
+        results_actions_group = QGroupBox('Actions')
         results_btn_layout = QHBoxLayout()
-        self.refresh_results_btn = QPushButton('Refresh Status')
+        results_btn_layout.setContentsMargins(5, 5, 5, 5)
+        results_btn_layout.setSpacing(3)
+
+        self.refresh_results_btn = QPushButton('Refresh')
+        self.refresh_results_btn.setMaximumWidth(80)
         self.refresh_results_btn.clicked.connect(self.refresh_status)
-        self.refresh_results_btn.setToolTip('Update the status and progress of the selected task')
 
-        self.download_btn = QPushButton('Download Results')
+        self.download_btn = QPushButton('Download')
+        self.download_btn.setMaximumWidth(80)
         self.download_btn.clicked.connect(self.download_results)
-        self.download_btn.setToolTip('Download all processing results as a ZIP archive')
 
-        self.import_btn = QPushButton('Import to QGIS')
+        self.import_btn = QPushButton('Import')
+        self.import_btn.setMaximumWidth(80)
         self.import_btn.clicked.connect(self.import_to_qgis)
-        self.import_btn.setToolTip('Import orthophotos, DSMs, and other results directly into QGIS layers')
 
         results_btn_layout.addWidget(self.refresh_results_btn)
         results_btn_layout.addWidget(self.download_btn)
         results_btn_layout.addWidget(self.import_btn)
         results_btn_layout.addStretch()
+        results_actions_group.setLayout(results_btn_layout)
+
+        # Compact results display
+        results_display_group = QGroupBox('Results')
+        results_display_layout = QVBoxLayout()
+        results_display_layout.setContentsMargins(5, 5, 5, 5)
+        results_display_layout.setSpacing(3)
 
         self.results_text = QTextEdit()
+        self.results_text.setMinimumHeight(60)
+        self.results_text.setMaximumHeight(100)
         self.results_text.setReadOnly(True)
-        self.results_text.setToolTip('Detailed status messages and progress information for the selected task')
+        results_display_layout.addWidget(self.results_text)
+        results_display_group.setLayout(results_display_layout)
 
         results_layout.addWidget(results_task_group)
-        results_layout.addLayout(results_btn_layout)
-        results_layout.addWidget(self.results_text)
+        results_layout.addWidget(results_actions_group)
+        results_layout.addWidget(results_display_group)
+        results_layout.addStretch()
 
-        self.results_tab.setLayout(results_layout)
+        scroll.setWidget(scroll_content)
+        tab_layout = QVBoxLayout()
+        tab_layout.addWidget(scroll)
+        tab_layout.setContentsMargins(0,0,0,0)
+        self.results_tab.setLayout(tab_layout)
         self.tabs.addTab(self.results_tab, 'Results')
 
         layout.addWidget(self.tabs)
-        self.setLayout(layout)
+        central_widget.setLayout(layout)
 
         # Load initial projects
         self.load_projects()
 
         # Apply default preset on startup
         self.apply_preset('Default')
+
+        # Update images display
+        self.update_images_display()
+
+    def closeEvent(self, event):
+        # Hide the dock instead of closing it
+        event.ignore()
+        self.hide()
         
-    def test_connection(self):
-        url = self.url_edit.text().strip()
-        if not url:
-            QMessageBox.warning(self, 'Connection', 'Please enter a URL for the ODM server.')
-            return
-            
-        if not url.startswith('http://') and not url.startswith('https://'):
-            url = 'http://' + url
-            self.url_edit.setText(url)
-            
-        token = self.token_edit.text().strip()
-        self.odm.set_credentials(url, token)
-        
-        if self.odm.test_connection():
-            QMessageBox.information(self, 'Connection', f'Successfully connected to ODM server at {url}!')
-        else:
-            QMessageBox.critical(self, 'Connection', f'Failed to connect to ODM server at {url}.\n\nPlease check:\n1. URL is correct (e.g., http://localhost:3000)\n2. ODM server is running\n3. No firewall blocking the connection')
-            
+    def show_connection_dialog(self):
+        dialog = ConnectionDialog(self.odm, self)
+        dialog.exec_()
     def load_projects(self):
         tasks = self.odm.get_tasks()
         self.projects_list.clear()
@@ -646,7 +1304,7 @@ class ODMDialog(QDialog):
                 self.current_project = None
                 self.delete_task_btn.setEnabled(False)
                 self.stop_task_btn.setEnabled(False)
-                self.start_task_btn.setEnabled(len(self.image_paths) > 0)
+                self.update_images_display()
                 if hasattr(self, 'status_timer'):
                     self.status_timer.stop()
                 # Refresh the task list (updates both Tasks and Results tabs)
@@ -771,6 +1429,7 @@ class ODMDialog(QDialog):
                 'quality': 50,
                 'dsm': True,
                 'dtm': True,
+                'pc_classify': True,  # Essential for proper DTM generation
                 'orthophoto': True,
                 'reconstruction': 'high',
                 'fov': 60,
@@ -849,7 +1508,7 @@ class ODMDialog(QDialog):
     def update_task_buttons(self):
         """Update button states based on current task status"""
         if not self.current_project:
-            self.start_task_btn.setEnabled(len(self.image_paths) > 0)
+            self.update_images_display()
             self.stop_task_btn.setEnabled(False)
             return
 
@@ -860,7 +1519,7 @@ class ODMDialog(QDialog):
                 self.start_task_btn.setEnabled(False)
                 self.stop_task_btn.setEnabled(True)
             else:
-                self.start_task_btn.setEnabled(len(self.image_paths) > 0)
+                self.update_images_display()
                 self.stop_task_btn.setEnabled(False)
             
     def start_status_monitoring(self):
@@ -874,15 +1533,58 @@ class ODMDialog(QDialog):
         # Initial status check
         self.refresh_status()
             
-    def add_images(self):
+    def add_images_from_files(self):
         files, _ = QFileDialog.getOpenFileNames(self, 'Select Images', '', 'Image files (*.jpg *.jpeg *.png *.tif *.tiff)')
         for file in files:
             self.image_paths.append(file)
-            self.images_list.addItem(os.path.basename(file))
+        self.update_images_display()
+
+    def add_images_from_directory(self):
+        directory = QFileDialog.getExistingDirectory(self, 'Select Directory with Images')
+        if directory:
+            image_extensions = ('.jpg', '.jpeg', '.png', '.tif', '.tiff', '.JPG', '.JPEG', '.PNG', '.TIF', '.TIFF')
+            count = 0
+            for filename in os.listdir(directory):
+                if filename.lower().endswith(image_extensions):
+                    self.image_paths.append(os.path.join(directory, filename))
+                    count += 1
+            if count == 0:
+                QMessageBox.information(self, 'No Images', 'No image files found in the selected directory.')
+            self.update_images_display()
             
     def clear_images(self):
-        self.images_list.clear()
         self.image_paths.clear()
+        # Also clear images from photo dock if it exists
+        if hasattr(self, 'photos_dock') and self.photos_dock:
+            self.photos_dock.set_image_paths([])
+        self.update_images_display()
+
+    def update_images_display(self):
+        """Update the images count and visibility"""
+        count = len(self.image_paths)
+        self.images_count_label.setText(f'{count} selected')
+
+        # Auto-show photos dock when images are loaded
+        if count > 0:
+            self.start_task_btn.setEnabled(True)
+            if not hasattr(self, 'photos_dock') or self.photos_dock is None:
+                # Check if dock already exists in QGIS (from previous session/reload)
+                existing_dock = self.iface.mainWindow().findChild(PhotosDock, 'odm_photos_dock')
+                if existing_dock:
+                    self.photos_dock = existing_dock
+                else:
+                    self.photos_dock = PhotosDock(self)
+                    self.iface.addDockWidget(Qt.LeftDockWidgetArea, self.photos_dock)
+                # Show success message after images are loaded
+                if hasattr(self, 'pending_project_load_success') and self.pending_project_load_success:
+                    QMessageBox.information(self, 'Success', f'Project "{self.project_name}" loaded successfully!')
+                    self.pending_project_load_success = False
+            self.photos_dock.show()
+            self.photos_dock.set_image_paths(self.image_paths)
+        else:
+            self.start_task_btn.setEnabled(False)
+
+
         
     def start_task_processing(self):
         if len(self.image_paths) == 0:
@@ -901,9 +1603,7 @@ class ODMDialog(QDialog):
                 options['dsm'] = True
             if self.dtm_checkbox.isChecked():
                 options['dtm'] = True
-
-            # Note: DTM generation is controlled by the Options tab advanced settings
-            # The checkbox here only controls import, not generation
+                options['pc-classify'] = True  # Essential for proper DTM generation
             if self.orthophoto_checkbox.isChecked():
                 options['orthophoto-resolution'] = str(self.resolution_spin.value())
             
@@ -943,8 +1643,10 @@ class ODMDialog(QDialog):
             options['feature-quality'] = quality_map.get(self.feature_extraction_combo.currentText(), 'medium')
             
             self.status_text.append(f'Creating task "{name}" with {len(self.image_paths)} images...')
-            self.progress_bar.setVisible(True)
-            self.progress_bar.setRange(0, 0)  # Indeterminate progress
+            # Show progress in QGIS message bar
+            from qgis.core import Qgis
+            self.task_message = self.iface.messageBar().createMessage('ODM: Creating task...')
+            self.iface.messageBar().pushWidget(self.task_message, Qgis.Info)
             
             task = self.odm.create_task(self.image_paths, options, name)
             if task:
@@ -960,7 +1662,10 @@ class ODMDialog(QDialog):
                 self.stop_task_btn.setEnabled(True)
             else:
                 QMessageBox.critical(self, 'Error', 'Failed to create task.\n\nCheck that:\n1. NodeODM server is running\n2. Images are valid drone photos\n3. Server has enough resources\n\nSee QGIS Python Console for detailed errors.')
-                self.progress_bar.setVisible(False)
+                # Remove task creation message
+                if hasattr(self, 'task_message'):
+                    self.iface.messageBar().popWidget(self.task_message)
+                    delattr(self, 'task_message')
             
     def refresh_status(self):
         if not self.current_project:
@@ -991,13 +1696,25 @@ class ODMDialog(QDialog):
             }
             status_text = status_map.get(status_code, f'UNKNOWN({status_code})')
             
-            # Update progress bar
+            # Update QGIS progress/status
             if status_code == 20:  # RUNNING
-                self.progress_bar.setVisible(True)
-                self.progress_bar.setRange(0, 100)
-                self.progress_bar.setValue(int(progress))  # Convert float to int
+                # Show progress in QGIS status bar
+                self.iface.mainWindow().statusBar().showMessage(f'ODM: {name} - {status_text} ({int(progress)}%)')
+                # Show message in QGIS message bar
+                if not hasattr(self, 'progress_message'):
+                    from qgis.core import Qgis
+                    self.progress_message = self.iface.messageBar().createMessage(f'ODM Processing: {name} - {int(progress)}% complete')
+                    self.iface.messageBar().pushWidget(self.progress_message, Qgis.Info, 0)
+                else:
+                    # Update existing message
+                    self.progress_message.setText(f'ODM Processing: {name} - {int(progress)}% complete')
             elif status_code in [40, 30, 50]:  # COMPLETED, FAILED, CANCELED
-                self.progress_bar.setVisible(False)
+                # Clear progress from status bar
+                self.iface.mainWindow().statusBar().clearMessage()
+                # Remove progress message from message bar
+                if hasattr(self, 'progress_message'):
+                    self.iface.messageBar().popWidget(self.progress_message)
+                    delattr(self, 'progress_message')
             
             # Format processing time
             if processing_time > 0:
@@ -1105,12 +1822,10 @@ class ODMDialog(QDialog):
                 
             # Load images
             self.image_paths = project_data.get('images', [])
-            self.images_list.clear()
             for path in self.image_paths:
-                if os.path.exists(path):
-                    self.images_list.addItem(os.path.basename(path))
-                else:
+                if not os.path.exists(path):
                     self.status_text.append(f'⚠ Image not found: {os.path.basename(path)}')
+            self.update_images_display()
             
             # Load preset first (this will auto-configure options)
             preset = project_data.get('preset', 'Custom')
@@ -1142,16 +1857,15 @@ class ODMDialog(QDialog):
             odm_settings = project_data.get('odm_settings', {})
             if odm_settings.get('base_url'):
                 self.odm.set_credentials(
-                    odm_settings['base_url'], 
+                    odm_settings['base_url'],
                     odm_settings.get('token', '')
                 )
-                self.url_edit.setText(odm_settings['base_url'])
-                self.token_edit.setText(odm_settings.get('token', ''))
             
             # Store project name
             self.project_name = project_data.get('name', 'Loaded Project')
-            
-            QMessageBox.information(self, 'Success', f'Project "{self.project_name}" loaded successfully!')
+
+            # Don't show success message yet - wait for images to load
+            self.pending_project_load_success = True
             
         except Exception as e:
             QMessageBox.critical(self, 'Error', f'Failed to load project: {str(e)}')
@@ -1199,7 +1913,7 @@ class ODMDialog(QDialog):
                 layout.addWidget(self.ortho_checkbox)
                 layout.addWidget(self.dsm_checkbox)
                 layout.addWidget(self.dtm_checkbox)
-                layout.addWidget(QLabel('Note: DTM and DSM generation must be enabled in Options tab'))
+                layout.addWidget(QLabel('Note: Enable DSM/DTM generation in Processing tab before starting task'))
                 layout.addWidget(self.point_cloud_checkbox)
                 
                 buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1245,7 +1959,7 @@ class ODMDialog(QDialog):
                 zip_ref.extractall(temp_dir)
                 
             # Import selected results
-            from qgis.core import QgsRasterLayer, QgsVectorLayer, QgsProject
+            from qgis.core import QgsRasterLayer, QgsVectorLayer, QgsPointCloudLayer, QgsProject
             iface = self.iface
             
             imported_count = 0
@@ -1262,17 +1976,21 @@ class ODMDialog(QDialog):
                         
             # DSM
             if options['dsm']:
-                dsm_path = os.path.join(temp_dir, 'odm_dsm', 'odm_dsm.tif')
+                dsm_path = os.path.join(temp_dir, 'odm_dem', 'dsm.tif')
                 if os.path.exists(dsm_path):
                     layer = QgsRasterLayer(dsm_path, 'DSM', 'gdal')
                     if layer.isValid():
                         QgsProject.instance().addMapLayer(layer)
                         imported_count += 1
                         self.status_text.append('✓ DSM imported')
-                        
+                    else:
+                        self.status_text.append('DSM file exists but could not be loaded as valid layer')
+                else:
+                    self.status_text.append('DSM file not found - make sure DSM generation was enabled during processing')
+
             # DTM
             if options['dtm']:
-                dtm_path = os.path.join(temp_dir, 'odm_dtm', 'odm_dtm.tif')
+                dtm_path = os.path.join(temp_dir, 'odm_dem', 'dtm.tif')
                 if os.path.exists(dtm_path):
                     layer = QgsRasterLayer(dtm_path, 'DTM', 'gdal')
                     if layer.isValid():
@@ -1282,7 +2000,7 @@ class ODMDialog(QDialog):
                     else:
                         self.status_text.append('DTM file exists but could not be loaded as valid layer')
                 else:
-                    self.status_text.append('DTM file not found - make sure DTM generation was enabled in Options tab during processing')
+                    self.status_text.append('DTM file not found - make sure DTM generation was enabled during processing')
                     # List available directories for debugging
                     try:
                         dirs = [d for d in os.listdir(temp_dir) if os.path.isdir(os.path.join(temp_dir, d))]
@@ -1292,13 +2010,30 @@ class ODMDialog(QDialog):
                         
             # Point Cloud
             if options['point_cloud']:
-                las_path = os.path.join(temp_dir, 'odm_georeferenced_model', 'odm_georeferenced_model.las')
-                if os.path.exists(las_path):
-                    layer = QgsVectorLayer(las_path, 'Point Cloud', 'ogr')
-                    if layer.isValid():
-                        QgsProject.instance().addMapLayer(layer)
-                        imported_count += 1
-                        self.status_text.append('✓ Point cloud imported')
+                # Try multiple point cloud formats and locations
+                point_cloud_paths = [
+                    'odm_georeferencing/odm_georeferenced_model.laz',  # COPC LAZ (preferred)
+                    'odm_georeferencing/odm_georeferenced_model.las',  # Standard LAS
+                    'entwine_pointcloud/ept-data/0-0-0-0.laz',        # Entwine format
+                    'entwine_pointcloud/pointclouds.laz'              # Web format
+                ]
+
+                for pc_path in point_cloud_paths:
+                    full_path = os.path.join(temp_dir, pc_path)
+                    if os.path.exists(full_path):
+                        layer = QgsPointCloudLayer(full_path, f'Point Cloud ({pc_path})', 'pointcloud')
+                        if layer.isValid():
+                            QgsProject.instance().addMapLayer(layer)
+                            imported_count += 1
+                            self.status_text.append(f'✓ Point cloud imported from {pc_path}')
+                            break  # Found a valid point cloud, stop looking
+                        else:
+                            self.status_text.append(f'Point cloud file exists at {pc_path} but could not be loaded')
+                    else:
+                        self.status_text.append(f'Point cloud file not found: {pc_path}')
+
+                if imported_count == 0:  # No point cloud imported
+                    self.status_text.append('No valid point cloud files found - make sure point cloud generation was enabled')
                         
             if imported_count > 0:
                 iface.mapCanvas().refreshAllLayers()

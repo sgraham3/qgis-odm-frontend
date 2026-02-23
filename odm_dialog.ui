@@ -1,0 +1,531 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>ODMDialog</class>
+ <widget class="QDockWidget" name="ODMDialog">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>380</width>
+    <height>600</height>
+   </rect>
+  </property>
+  <property name="minimumSize">
+   <size>
+    <width>320</width>
+    <height>320</height>
+   </size>
+  </property>
+  <property name="maximumSize">
+   <size>
+    <width>450</width>
+    <height>524287</height>
+   </size>
+  </property>
+  <property name="windowTitle">
+   <string>ODM Frontend</string>
+  </property>
+  <widget class="QWidget" name="dockWidgetContents">
+   <layout class="QVBoxLayout" name="verticalLayout">
+    <property name="spacing">
+     <number>1</number>
+    </property>
+    <property name="leftMargin">
+     <number>1</number>
+    </property>
+    <property name="topMargin">
+     <number>1</number>
+    </property>
+    <property name="rightMargin">
+     <number>1</number>
+    </property>
+    <property name="bottomMargin">
+     <number>1</number>
+    </property>
+    <item>
+     <layout class="QHBoxLayout" name="topBarLayout">
+      <property name="spacing">
+       <number>0</number>
+      </property>
+      <property name="leftMargin">
+       <number>0</number>
+      </property>
+      <property name="topMargin">
+       <number>0</number>
+      </property>
+      <property name="rightMargin">
+       <number>0</number>
+      </property>
+      <property name="bottomMargin">
+       <number>0</number>
+      </property>
+      <item>
+       <spacer name="horizontalSpacer">
+        <property name="orientation">
+         <enum>Qt::Orientation::Horizontal</enum>
+        </property>
+        <property name="sizeHint" stdset="0">
+         <size>
+          <width>40</width>
+          <height>20</height>
+         </size>
+        </property>
+       </spacer>
+      </item>
+      <item>
+       <widget class="QPushButton" name="menuBtn">
+        <property name="maximumSize">
+         <size>
+          <width>30</width>
+          <height>16777215</height>
+         </size>
+        </property>
+        <property name="toolTip">
+         <string>Project Menu</string>
+        </property>
+        <property name="text">
+         <string>☰</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <widget class="QTabWidget" name="tabs">
+      <property name="currentIndex">
+       <number>0</number>
+      </property>
+      <widget class="QWidget" name="processingTab">
+       <attribute name="title">
+        <string>Processing</string>
+       </attribute>
+       <layout class="QVBoxLayout" name="processingLayout">
+        <property name="spacing">
+         <number>1</number>
+        </property>
+        <property name="leftMargin">
+         <number>1</number>
+        </property>
+        <property name="topMargin">
+         <number>1</number>
+        </property>
+        <property name="rightMargin">
+         <number>1</number>
+        </property>
+        <property name="bottomMargin">
+         <number>1</number>
+        </property>
+        <item>
+         <widget class="QGroupBox" name="imagesGroup">
+          <property name="title">
+           <string>Images</string>
+          </property>
+          <widget class="QListWidget" name="imagesList">
+           <property name="geometry">
+            <rect>
+             <x>3</x>
+             <y>19</y>
+             <width>364</width>
+             <height>80</height>
+            </rect>
+           </property>
+           <property name="minimumSize">
+            <size>
+             <width>0</width>
+             <height>40</height>
+            </size>
+           </property>
+           <property name="maximumSize">
+            <size>
+             <width>16777215</width>
+             <height>80</height>
+            </size>
+           </property>
+           <property name="toolTip">
+            <string>List of uploaded drone images</string>
+           </property>
+          </widget>
+          <widget class="QPushButton" name="clearImagesBtn">
+           <property name="geometry">
+            <rect>
+             <x>80</x>
+             <y>101</y>
+             <width>75</width>
+             <height>24</height>
+            </rect>
+           </property>
+           <property name="text">
+            <string>Clear</string>
+           </property>
+          </widget>
+          <widget class="QPushButton" name="addImagesBtn">
+           <property name="geometry">
+            <rect>
+             <x>4</x>
+             <y>101</y>
+             <width>75</width>
+             <height>24</height>
+            </rect>
+           </property>
+           <property name="text">
+            <string>Add Images</string>
+           </property>
+          </widget>
+         </widget>
+        </item>
+        <item>
+         <widget class="QGroupBox" name="optionsGroup">
+          <property name="title">
+           <string>Task Settings</string>
+          </property>
+          <layout class="QGridLayout" name="optionsGrid">
+           <property name="leftMargin">
+            <number>1</number>
+           </property>
+           <property name="topMargin">
+            <number>1</number>
+           </property>
+           <property name="rightMargin">
+            <number>1</number>
+           </property>
+           <property name="bottomMargin">
+            <number>1</number>
+           </property>
+           <property name="spacing">
+            <number>2</number>
+           </property>
+           <item row="0" column="0">
+            <widget class="QLabel" name="presetLabel">
+             <property name="text">
+              <string>Preset:</string>
+             </property>
+            </widget>
+           </item>
+           <item row="0" column="1">
+            <widget class="QComboBox" name="presetCombo">
+             <item>
+              <property name="text">
+               <string>Custom</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Default</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>High Resolution</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Fast Orthophoto</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Field</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>DSM+DTM</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>3D Model</string>
+              </property>
+             </item>
+            </widget>
+           </item>
+           <item row="1" column="0" colspan="2">
+            <layout class="QHBoxLayout" name="checkboxLayout">
+             <property name="spacing">
+              <number>5</number>
+             </property>
+             <item>
+              <widget class="QCheckBox" name="dsmCheckbox">
+               <property name="text">
+                <string>DSM</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QCheckBox" name="dtmCheckbox">
+               <property name="text">
+                <string>DTM</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QCheckBox" name="orthophotoCheckbox">
+               <property name="text">
+                <string>Orthophoto</string>
+               </property>
+              </widget>
+             </item>
+            </layout>
+           </item>
+          </layout>
+         </widget>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="processBtnLayout">
+          <property name="spacing">
+           <number>1</number>
+          </property>
+          <item>
+           <widget class="QPushButton" name="startTaskBtn">
+            <property name="text">
+             <string>▶️ Create Task &amp; Start Processing</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="stopTaskBtn">
+            <property name="text">
+             <string>⏹️ Stop</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="statusLayout">
+          <property name="spacing">
+           <number>1</number>
+          </property>
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>0</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+          <item>
+           <widget class="QLabel" name="statusLabel">
+            <property name="text">
+             <string>Status:</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QProgressBar" name="progressBar">
+            <property name="value">
+             <number>0</number>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <widget class="QTextEdit" name="statusText">
+          <property name="maximumSize">
+           <size>
+            <width>16777215</width>
+            <height>25</height>
+           </size>
+          </property>
+          <property name="readOnly">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+      <widget class="QWidget" name="optionsTab">
+       <attribute name="title">
+        <string>Options</string>
+       </attribute>
+      </widget>
+      <widget class="QWidget" name="gcpTab">
+       <attribute name="title">
+        <string>GCPs</string>
+       </attribute>
+      </widget>
+      <widget class="QWidget" name="tasksTab">
+       <attribute name="title">
+        <string>Tasks</string>
+       </attribute>
+       <layout class="QVBoxLayout" name="tasksLayout">
+        <property name="spacing">
+         <number>1</number>
+        </property>
+        <item>
+         <layout class="QHBoxLayout" name="taskBtnLayout">
+          <property name="spacing">
+           <number>2</number>
+          </property>
+          <item>
+           <widget class="QPushButton" name="refreshTasksBtn">
+            <property name="text">
+             <string>🔄 Refresh Tasks</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="deleteTaskBtn">
+            <property name="text">
+             <string>🗑️ Delete Task</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <widget class="QGroupBox" name="tasksListGroup">
+          <property name="title">
+           <string>Active Tasks</string>
+          </property>
+          <layout class="QVBoxLayout" name="tasksListLayout">
+           <property name="spacing">
+            <number>1</number>
+           </property>
+           <property name="leftMargin">
+            <number>2</number>
+           </property>
+           <property name="topMargin">
+            <number>2</number>
+           </property>
+           <property name="rightMargin">
+            <number>2</number>
+           </property>
+           <property name="bottomMargin">
+            <number>2</number>
+           </property>
+           <item>
+            <widget class="QListWidget" name="projectsList">
+             <property name="minimumSize">
+              <size>
+               <width>0</width>
+               <height>50</height>
+              </size>
+             </property>
+             <property name="maximumSize">
+              <size>
+               <width>16777215</width>
+               <height>100</height>
+              </size>
+             </property>
+             <property name="toolTip">
+              <string>Click on a task to select it for monitoring or deletion</string>
+             </property>
+            </widget>
+           </item>
+          </layout>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+      <widget class="QWidget" name="resultsTab">
+       <attribute name="title">
+        <string>Results</string>
+       </attribute>
+       <layout class="QVBoxLayout" name="resultsLayout">
+        <property name="spacing">
+         <number>1</number>
+        </property>
+        <item>
+         <widget class="QGroupBox" name="resultsTaskGroup">
+          <property name="title">
+           <string>Select Task to Monitor</string>
+          </property>
+          <layout class="QVBoxLayout" name="resultsTaskLayout">
+           <property name="spacing">
+            <number>1</number>
+           </property>
+           <property name="leftMargin">
+            <number>2</number>
+           </property>
+           <property name="topMargin">
+            <number>2</number>
+           </property>
+           <property name="rightMargin">
+            <number>2</number>
+           </property>
+           <property name="bottomMargin">
+            <number>2</number>
+           </property>
+           <item>
+            <widget class="QLabel" name="taskLabel">
+             <property name="text">
+              <string>Choose a task to monitor:</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QComboBox" name="resultsTaskCombo">
+             <item>
+              <property name="text">
+               <string>No task selected</string>
+              </property>
+             </item>
+            </widget>
+           </item>
+          </layout>
+         </widget>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="resultsBtnLayout">
+          <property name="spacing">
+           <number>2</number>
+          </property>
+          <item>
+           <widget class="QPushButton" name="refreshResultsBtn">
+            <property name="text">
+             <string>Refresh Status</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="downloadBtn">
+            <property name="text">
+             <string>Download Results</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="importBtn">
+            <property name="text">
+             <string>Import to QGIS</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <widget class="QTextEdit" name="resultsText">
+          <property name="minimumSize">
+           <size>
+            <width>0</width>
+            <height>20</height>
+           </size>
+          </property>
+          <property name="maximumSize">
+           <size>
+            <width>16777215</width>
+            <height>30</height>
+           </size>
+          </property>
+          <property name="readOnly">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
