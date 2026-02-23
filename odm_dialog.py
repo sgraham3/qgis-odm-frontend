@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 import os
 from qgis.PyQt.QtWidgets import (QDockWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                                  QLineEdit, QPushButton, QTabWidget, QWidget,
-                                  QGroupBox, QListWidget, QFileDialog, QMessageBox,
-                                  QTextEdit, QCheckBox, QComboBox,
-                                  QSpinBox, QDialogButtonBox, QFormLayout, QSizePolicy,
-                                  QGridLayout, QScrollArea, QMenu, QAction, QDialog, QSizePolicy, QFrame)
-from qgis.PyQt.QtCore import QThread, pyqtSignal, QTimer, Qt, QEvent
-from qgis.core import QgsProject
+                                   QLineEdit, QPushButton, QTabWidget, QWidget,
+                                   QGroupBox, QListWidget, QFileDialog, QMessageBox,
+                                   QTextEdit, QCheckBox, QComboBox,
+                                   QSpinBox, QDialogButtonBox, QFormLayout, QSizePolicy,
+                                   QGridLayout, QScrollArea, QMenu, QAction, QDialog, QSizePolicy, QFrame,
+                                   QMainWindow, QToolBar, QRadioButton, QButtonGroup, QListWidgetItem,
+                                   QDoubleSpinBox, QSplitter)
+from qgis.PyQt.QtCore import QThread, pyqtSignal, QTimer, Qt, QEvent, pyqtBoundSignal
+from qgis.PyQt.QtGui import QPixmap, QPainter, QPen, QColor, QCursor, QFont
+from qgis.core import QgsProject, QgsRasterLayer, QgsCoordinateReferenceSystem, QgsPointXY, QgsGeometry
+from qgis.gui import QgsMapCanvas, QgsMapToolZoom, QgsMapToolPan, QgsMapToolEmitPoint, QgsVertexMarker
 from .odm_connection import ODMConnection
 
 
@@ -93,6 +97,14 @@ class PhotosDock(QDockWidget):
         """Create the hamburger menu with photo options"""
         self.photo_menu = QMenu(self)
 
+        # GCP Point action
+        gcp_action = QAction('📍 Add GCP Point', self)
+        gcp_action.triggered.connect(self.open_gcp_picker_for_selected)
+        gcp_action.setToolTip('Mark this image for Ground Control Point')
+        self.photo_menu.addAction(gcp_action)
+
+        self.photo_menu.addSeparator()
+
         # Rotate left
         rotate_left_action = QAction('↺ Rotate Left', self)
         rotate_left_action.triggered.connect(self.rotate_left)
@@ -126,8 +138,26 @@ class PhotosDock(QDockWidget):
     def enable_menu_actions(self, enabled):
         """Enable/disable menu actions based on selection"""
         for action in self.photo_menu.actions():
-            if action.text() in ['↺ Rotate Left', '↻ Rotate Right', '🗑️ Remove Selected']:
+            if action.text() in ['↺ Rotate Left', '↻ Rotate Right', '🗑️ Remove Selected', '📍 Add GCP Point']:
                 action.setEnabled(enabled)
+
+    def open_gcp_picker_for_selected(self):
+        """Open GCP image picker for the currently selected image"""
+        if 0 <= self.current_image_index < len(self.image_paths):
+            self.open_gcp_picker(self.current_image_index)
+
+    def open_gcp_picker(self, index):
+        """Open GCP image picker for a specific image"""
+        if 0 <= index < len(self.image_paths):
+            image_path = self.image_paths[index]
+            picker = GCPImagePickerDialog(image_path, self, gcp_mode=True)
+            picker.point_selected.connect(self.on_gcp_point_selected)
+            picker.exec_()
+
+    def on_gcp_point_selected(self, pixel_x, pixel_y, filename):
+        """Handle when a GCP point is selected on an image"""
+        if self.parent_dialog:
+            self.parent_dialog.add_image_point_to_gcp_workflow(pixel_x, pixel_y, filename)
 
     def set_image_paths(self, image_paths):
         """Set the list of image paths to display with lazy loading"""
@@ -254,6 +284,7 @@ class PhotosDock(QDockWidget):
 
         # Make clickable with minimal styling
         widget.mousePressEvent = lambda event, idx=index: self.select_image(idx)
+        widget.mouseDoubleClickEvent = lambda event, idx=index: self.open_image_viewer(idx)
         widget.setStyleSheet("""
             QWidget {
                 border: 1px solid transparent;
@@ -267,6 +298,13 @@ class PhotosDock(QDockWidget):
         """)
 
         return widget
+
+    def open_image_viewer(self, index):
+        """Open an image in a separate map canvas window"""
+        if 0 <= index < len(self.image_paths):
+            image_path = self.image_paths[index]
+            viewer = ImageMapWindow(image_path, self)
+            viewer.show()
 
     def select_image(self, index):
         """Select an image for operations"""
@@ -424,6 +462,589 @@ class PhotosDock(QDockWidget):
                 self.refresh_image_display()
 
 
+class ImageMapWindow(QMainWindow):
+    def __init__(self, image_path, parent=None):
+        super().__init__(parent)
+        
+        self.image_path = image_path
+        self.setWindowTitle(f'Image Viewer - {os.path.basename(image_path)}')
+        self.setMinimumSize(400, 300)
+        self.resize(800, 600)
+        
+        # Create map canvas
+        self.canvas = QgsMapCanvas(self)
+        self.canvas.setCanvasColor(Qt.black)
+        self.canvas.enableAntiAliasing(True)
+        self.setCentralWidget(self.canvas)
+        
+        # Create map tools
+        self.pan_tool = QgsMapToolPan(self.canvas)
+        self.zoom_in_tool = QgsMapToolZoom(self.canvas, False)
+        self.zoom_out_tool = QgsMapToolZoom(self.canvas, True)
+        
+        # Create toolbar with map tools
+        toolbar = self.addToolBar('Map Tools')
+        toolbar.setStyleSheet("QToolBar { spacing: 5px; padding: 5px; }")
+        
+        # Pan button
+        pan_btn = QPushButton('Pan')
+        pan_btn.setToolTip('Pan the view')
+        pan_btn.clicked.connect(self.activate_pan)
+        toolbar.addWidget(pan_btn)
+        
+        # Zoom In button
+        zoom_in_btn = QPushButton('Zoom In')
+        zoom_in_btn.setToolTip('Zoom in (drag to rectangle)')
+        zoom_in_btn.clicked.connect(self.activate_zoom_in)
+        toolbar.addWidget(zoom_in_btn)
+        
+        # Zoom Out button
+        zoom_out_btn = QPushButton('Zoom Out')
+        zoom_out_btn.setToolTip('Zoom out (click to zoom out)')
+        zoom_out_btn.clicked.connect(self.activate_zoom_out)
+        toolbar.addWidget(zoom_out_btn)
+        
+        toolbar.addSeparator()
+        
+        # Zoom Full button
+        zoom_full_btn = QPushButton('Full Extent')
+        zoom_full_btn.setToolTip('Zoom to full extent')
+        zoom_full_btn.clicked.connect(self.zoom_full)
+        toolbar.addWidget(zoom_full_btn)
+        
+        # Load image as raster layer
+        self.layer = None
+        self._load_image()
+        
+        # Set pan tool as default
+        self.canvas.setMapTool(self.pan_tool)
+    
+    def activate_pan(self):
+        self.canvas.setMapTool(self.pan_tool)
+    
+    def activate_zoom_in(self):
+        self.canvas.setMapTool(self.zoom_in_tool)
+    
+    def activate_zoom_out(self):
+        self.canvas.setMapTool(self.zoom_out_tool)
+    
+    def zoom_full(self):
+        if self.layer:
+            self.canvas.setExtent(self.layer.extent())
+            self.canvas.refresh()
+    
+    def _load_image(self):
+        self.layer = QgsRasterLayer(self.image_path, os.path.basename(self.image_path))
+        
+        if not self.layer.isValid():
+            QMessageBox.warning(self, 'Error', f'Failed to load image: {os.path.basename(self.image_path)}')
+            return
+        
+        crs = QgsCoordinateReferenceSystem('EPSG:3857')
+        self.layer.setCrs(crs)
+        
+        self.canvas.setLayers([self.layer])
+        self.canvas.setExtent(self.layer.extent())
+        self.canvas.refresh()
+    
+    def closeEvent(self, event):
+        if self.layer:
+            del self.layer
+        event.accept()
+
+
+class GCPImagePickerDialog(QDialog):
+    """Dialog for selecting a GCP point on an image"""
+    
+    point_selected = pyqtSignal(float, float, str)  # x, y, filename
+    
+    def __init__(self, image_path, parent=None, gcp_mode=True):
+        super().__init__(parent)
+        
+        self.image_path = image_path
+        self.gcp_mode = gcp_mode
+        self.selected_point = None
+        self.zoom_factor = 1.0
+        self.min_zoom = 0.1
+        self.max_zoom = 10.0
+        self.pan_offset = [0, 0]
+        self.dragging = False
+        self.last_mouse_pos = None
+        
+        self.setWindowTitle(f'Select GCP Point - {os.path.basename(image_path)}')
+        self.setMinimumSize(600, 500)
+        self.resize(900, 700)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(5)
+        
+        # Toolbar
+        toolbar = QHBoxLayout()
+        
+        zoom_in_btn = QPushButton('+')
+        zoom_in_btn.setFixedWidth(30)
+        zoom_in_btn.setToolTip('Zoom In')
+        zoom_in_btn.clicked.connect(self.zoom_in)
+        toolbar.addWidget(zoom_in_btn)
+        
+        zoom_out_btn = QPushButton('-')
+        zoom_out_btn.setFixedWidth(30)
+        zoom_out_btn.setToolTip('Zoom Out')
+        zoom_out_btn.clicked.connect(self.zoom_out)
+        toolbar.addWidget(zoom_out_btn)
+        
+        fit_btn = QPushButton('Fit')
+        fit_btn.setToolTip('Fit to Window')
+        fit_btn.clicked.connect(self.fit_to_window)
+        toolbar.addWidget(fit_btn)
+        
+        actual_btn = QPushButton('100%')
+        actual_btn.setToolTip('Actual Size')
+        actual_btn.clicked.connect(self.actual_size)
+        toolbar.addWidget(actual_btn)
+        
+        toolbar.addStretch()
+        
+        # Info label
+        self.info_label = QLabel('Click on the image to mark GCP point')
+        self.info_label.setStyleSheet("color: #666; font-style: italic;")
+        toolbar.addWidget(self.info_label)
+        
+        layout.addLayout(toolbar)
+        
+        # Scroll area for image
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setAlignment(Qt.AlignCenter)
+        self.scroll_area.setStyleSheet("QScrollArea { background-color: #1a1a1a; }")
+        
+        # Image label
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setStyleSheet("QLabel { background-color: #1a1a1a; }")
+        self.image_label.setMouseTracking(True)
+        
+        # Load original image
+        self.original_pixmap = QPixmap(image_path)
+        if self.original_pixmap.isNull():
+            self.image_label.setText(f'Failed to load: {os.path.basename(image_path)}')
+        else:
+            self.image_label.setPixmap(self.original_pixmap)
+            self.original_size = self.original_pixmap.size()
+        
+        self.scroll_area.setWidget(self.image_label)
+        layout.addWidget(self.scroll_area)
+        
+        # Point info
+        point_layout = QHBoxLayout()
+        self.point_label = QLabel('Pixel: --')
+        self.point_label.setStyleSheet("font-weight: bold; color: #007bff;")
+        point_layout.addWidget(self.point_label)
+        point_layout.addStretch()
+        layout.addLayout(point_layout)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        cancel_btn = QPushButton('Cancel')
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+        
+        self.confirm_btn = QPushButton('Confirm Point')
+        self.confirm_btn.setEnabled(False)
+        self.confirm_btn.setStyleSheet("QPushButton:enabled { background-color: #28a745; color: white; font-weight: bold; }")
+        self.confirm_btn.clicked.connect(self.confirm_point)
+        button_layout.addWidget(self.confirm_btn)
+        
+        layout.addLayout(button_layout)
+        
+        # Enable mouse events
+        self.image_label.mousePressEvent = self.on_mouse_press
+        self.image_label.mouseMoveEvent = self.on_mouse_move
+        self.image_label.wheelEvent = self.on_wheel
+        
+        # Fit on show
+        QTimer.singleShot(100, self.fit_to_window)
+    
+    def on_mouse_press(self, event):
+        if event.button() == Qt.LeftButton and not self.original_pixmap.isNull():
+            # Get click position relative to displayed image
+            label_pos = self.image_label.mapFrom(self, event.pos())
+            
+            # Get current displayed pixmap
+            current_pixmap = self.image_label.pixmap()
+            if current_pixmap:
+                # Calculate offset (image is centered in label)
+                offset_x = (self.image_label.width() - current_pixmap.width()) / 2
+                offset_y = (self.image_label.height() - current_pixmap.height()) / 2
+                
+                # Image coordinates
+                img_x = label_pos.x() - offset_x
+                img_y = label_pos.y() - offset_y
+                
+                if 0 <= img_x <= current_pixmap.width() and 0 <= img_y <= current_pixmap.height():
+                    # Convert to original image coordinates
+                    scale_x = self.original_pixmap.width() / current_pixmap.width()
+                    scale_y = self.original_pixmap.height() / current_pixmap.height()
+                    
+                    self.selected_point = (img_x * scale_x, img_y * scale_y)
+                    self.point_label.setText(f'Pixel: ({self.selected_point[0]:.1f}, {self.selected_point[1]:.1f})')
+                    self.confirm_btn.setEnabled(True)
+                    self.draw_marker()
+    
+    def on_mouse_move(self, event):
+        pass
+    
+    def on_wheel(self, event):
+        if event.modifiers() & Qt.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.zoom_in()
+            else:
+                self.zoom_out()
+    
+    def draw_marker(self):
+        if not self.selected_point or self.original_pixmap.isNull():
+            return
+        
+        # Create a copy of the current displayed pixmap
+        current_pixmap = self.image_label.pixmap()
+        if not current_pixmap:
+            return
+        
+        # Draw marker on original pixmap then scale
+        marker_pixmap = QPixmap(self.original_pixmap)
+        painter = QPainter(marker_pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # Draw crosshair
+        pen = QPen(QColor(255, 0, 0), 3)
+        painter.setPen(pen)
+        
+        x, y = int(self.selected_point[0]), int(self.selected_point[1])
+        size = 20
+        
+        # Horizontal line
+        painter.drawLine(x - size, y, x + size, y)
+        # Vertical line
+        painter.drawLine(x, y - size, x, y + size)
+        
+        # Draw circle
+        painter.drawEllipse(x - size//2, y - size//2, size, size)
+        
+        painter.end()
+        
+        # Scale to current zoom
+        scaled = marker_pixmap.scaled(
+            int(self.original_size.width() * self.zoom_factor),
+            int(self.original_size.height() * self.zoom_factor),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
+        )
+        self.image_label.setPixmap(scaled)
+        self.image_label.resize(scaled.size())
+    
+    def zoom_in(self):
+        self.zoom_factor = min(self.max_zoom, self.zoom_factor * 1.25)
+        self.update_image()
+    
+    def zoom_out(self):
+        self.zoom_factor = max(self.min_zoom, self.zoom_factor / 1.25)
+        self.update_image()
+    
+    def fit_to_window(self):
+        if self.original_pixmap.isNull():
+            return
+        
+        viewport = self.scroll_area.viewport()
+        max_width = viewport.width() - 20
+        max_height = viewport.height() - 20
+        
+        img_width = self.original_pixmap.width()
+        img_height = self.original_pixmap.height()
+        
+        scale_w = max_width / img_width
+        scale_h = max_height / img_height
+        
+        self.zoom_factor = min(scale_w, scale_h)
+        self.update_image()
+    
+    def actual_size(self):
+        self.zoom_factor = 1.0
+        self.update_image()
+    
+    def update_image(self):
+        if self.original_pixmap.isNull():
+            return
+        
+        new_width = int(self.original_pixmap.width() * self.zoom_factor)
+        new_height = int(self.original_pixmap.height() * self.zoom_factor)
+        
+        scaled = self.original_pixmap.scaled(
+            new_width, new_height,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
+        )
+        self.image_label.setPixmap(scaled)
+        self.image_label.resize(scaled.size())
+        
+        # Redraw marker if selected
+        if self.selected_point:
+            self.draw_marker()
+    
+    def confirm_point(self):
+        if self.selected_point:
+            self.point_selected.emit(
+                self.selected_point[0],
+                self.selected_point[1],
+                os.path.basename(self.image_path)
+            )
+            self.accept()
+
+
+class GCPMapTool(QgsMapToolEmitPoint):
+    """Map tool for selecting GCP location on QGIS canvas"""
+    
+    point_picked = pyqtSignal(float, float)  # x, y in map coordinates
+    
+    def __init__(self, canvas):
+        super().__init__(canvas)
+        self.canvas = canvas
+        self.setCursor(QCursor(Qt.CrossCursor))
+    
+    def canvasPressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            point = self.toMapCoordinates(event.pos())
+            self.point_picked.emit(point.x(), point.y())
+            
+            # Show temporary marker
+            marker = QgsVertexMarker(self.canvas)
+            marker.setCenter(point)
+            marker.setIconType(QgsVertexMarker.ICON_CROSS)
+            marker.setColor(QColor(255, 0, 0))
+            marker.setIconSize(15)
+            marker.setPenWidth(2)
+            
+            # Remove marker after 2 seconds
+            QTimer.singleShot(2000, lambda: self.canvas.scene().removeItem(marker))
+
+
+class GCPSelectorDialog(QDialog):
+    """Dialog for selecting which GCP to add an image point to"""
+    
+    def __init__(self, pixel_x, pixel_y, filename, gcp_list, parent=None):
+        super().__init__(parent)
+        
+        self.setWindowTitle('Add to GCP')
+        self.setMinimumWidth(350)
+        self.setModal(True)
+        
+        self.selected_gcp_id = None
+        self.create_new = False
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        
+        # Image point info
+        info_group = QGroupBox('Image Point')
+        info_layout = QVBoxLayout(info_group)
+        info_layout.addWidget(QLabel(f'File: {filename}'))
+        info_layout.addWidget(QLabel(f'Pixel: ({pixel_x:.1f}, {pixel_y:.1f})'))
+        layout.addWidget(info_group)
+        
+        # GCP selection
+        select_group = QGroupBox('Select GCP')
+        select_layout = QVBoxLayout(select_group)
+        
+        self.button_group = QButtonGroup(self)
+        
+        # New GCP option
+        new_radio = QRadioButton('+ Create New GCP')
+        new_radio.setStyleSheet("font-weight: bold; color: #28a745;")
+        new_radio.setChecked(True)
+        self.button_group.addButton(new_radio, -1)
+        select_layout.addWidget(new_radio)
+        
+        # Existing GCPs
+        for gcp in gcp_list:
+            gcp_name = gcp.get('gcp_name', f"GCP {gcp['id']}")
+            img_count = len(gcp.get('image_points', []))
+            world_coords = f"({gcp['world_x']:.2f}, {gcp['world_y']:.2f})"
+            
+            radio = QRadioButton(f"{gcp_name} - World: {world_coords}")
+            radio.setToolTip(f"{img_count} image point(s)")
+            self.button_group.addButton(radio, gcp['id'])
+            select_layout.addWidget(radio)
+        
+        layout.addWidget(select_group)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        cancel_btn = QPushButton('Cancel')
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+        
+        add_btn = QPushButton('Add to GCP')
+        add_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; font-weight: bold; }")
+        add_btn.clicked.connect(self.accept)
+        button_layout.addWidget(add_btn)
+        
+        layout.addLayout(button_layout)
+    
+    def get_selection(self):
+        """Returns (gcp_id, create_new)"""
+        checked_id = self.button_group.checkedId()
+        if checked_id == -1:
+            return (None, True)
+        else:
+            return (checked_id, False)
+
+
+class GCPPropertiesDialog(QDialog):
+    """Dialog for entering GCP world coordinates and properties"""
+    
+    def __init__(self, pixel_x, pixel_y, filename, default_x=0, default_y=0, parent=None, iface=None):
+        super().__init__(parent)
+        
+        self.iface = iface
+        self.setWindowTitle('New GCP')
+        self.setMinimumWidth(400)
+        self.setModal(True)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        
+        # Image point info
+        img_group = QGroupBox('Image Point')
+        img_layout = QFormLayout(img_group)
+        img_layout.addRow('File:', QLabel(filename))
+        img_layout.addRow('Pixel:', QLabel(f'({pixel_x:.1f}, {pixel_y:.1f})'))
+        layout.addWidget(img_group)
+        
+        # World coordinates
+        world_group = QGroupBox('World Coordinates')
+        world_layout = QFormLayout(world_group)
+        
+        self.x_spin = QDoubleSpinBox()
+        self.x_spin.setRange(-999999999, 999999999)
+        self.x_spin.setDecimals(6)
+        self.x_spin.setValue(default_x)
+        self.x_spin.setMinimumWidth(150)
+        world_layout.addRow('X (Easting/Longitude):', self.x_spin)
+        
+        self.y_spin = QDoubleSpinBox()
+        self.y_spin.setRange(-999999999, 999999999)
+        self.y_spin.setDecimals(6)
+        self.y_spin.setValue(default_y)
+        self.y_spin.setMinimumWidth(150)
+        world_layout.addRow('Y (Northing/Latitude):', self.y_spin)
+        
+        z_layout = QHBoxLayout()
+        self.z_spin = QDoubleSpinBox()
+        self.z_spin.setRange(-99999, 99999)
+        self.z_spin.setDecimals(3)
+        self.z_spin.setValue(0)
+        
+        from_dem_btn = QPushButton('From DEM')
+        from_dem_btn.setToolTip('Extract elevation from loaded DEM layer')
+        from_dem_btn.clicked.connect(self.extract_z_from_dem)
+        z_layout.addWidget(self.z_spin)
+        z_layout.addWidget(from_dem_btn)
+        z_layout.addStretch()
+        world_layout.addRow('Z (Elevation):', z_layout)
+        
+        layout.addWidget(world_group)
+        
+        # GCP properties
+        prop_group = QGroupBox('GCP Properties')
+        prop_layout = QFormLayout(prop_group)
+        
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText('e.g., GCP01')
+        prop_layout.addRow('GCP Name:', self.name_edit)
+        
+        self.checkpoint_check = QCheckBox('Mark as Checkpoint')
+        self.checkpoint_check.setToolTip('Checkpoints are used for accuracy verification, not processing')
+        prop_layout.addRow('', self.checkpoint_check)
+        
+        layout.addWidget(prop_group)
+        
+        # Hint
+        hint = QLabel('Tip: Click on the map to set world coordinates')
+        hint.setStyleSheet("color: #666; font-style: italic;")
+        layout.addWidget(hint)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        cancel_btn = QPushButton('Cancel')
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+        
+        create_btn = QPushButton('Create GCP')
+        create_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; font-weight: bold; }")
+        create_btn.clicked.connect(self.accept)
+        button_layout.addWidget(create_btn)
+        
+        layout.addLayout(button_layout)
+    
+    def extract_z_from_dem(self):
+        """Extract Z value from a loaded DEM layer"""
+        if not self.iface:
+            QMessageBox.warning(self, 'Error', 'Cannot access DEM layers')
+            return
+        
+        layers = QgsProject.instance().mapLayers().values()
+        dem_layers = [l for l in layers if l.type() == 1 and l.bandCount() == 1]  # Raster type = 1
+        
+        if not dem_layers:
+            QMessageBox.warning(self, 'No DEM', 'No raster layers found. Load a DEM first.')
+            return
+        
+        # If multiple DEMs, let user select
+        if len(dem_layers) == 1:
+            dem = dem_layers[0]
+        else:
+            names = [l.name() for l in dem_layers]
+            from qgis.PyQt.QtWidgets import QInputDialog
+            name, ok = QInputDialog.getItem(self, 'Select DEM', 'Choose DEM layer:', names, 0, False)
+            if not ok or not name:
+                return
+            dem = next(l for l in dem_layers if l.name() == name)
+        
+        # Sample at current X, Y
+        try:
+            x = self.x_spin.value()
+            y = self.y_spin.value()
+            point = QgsPointXY(x, y)
+            
+            # Identify value at point
+            results = dem.dataProvider().identify(point, 1)  # Identify by value
+            if results.isValid():
+                z = results.results()[1]  # Band 1 value
+                self.z_spin.setValue(float(z))
+                QMessageBox.information(self, 'Success', f'Extracted elevation: {z:.3f}')
+            else:
+                QMessageBox.warning(self, 'Error', 'Could not sample DEM at this location')
+        except Exception as e:
+            QMessageBox.warning(self, 'Error', f'Failed to extract Z: {str(e)}')
+    
+    def get_gcp_data(self):
+        """Returns GCP data dict"""
+        return {
+            'world_x': self.x_spin.value(),
+            'world_y': self.y_spin.value(),
+            'world_z': self.z_spin.value(),
+            'gcp_name': self.name_edit.text().strip() or None,
+            'is_checkpoint': self.checkpoint_check.isChecked()
+        }
+
+
 class ConnectionDialog(QDialog):
     def __init__(self, odm_connection, parent=None):
         super().__init__(parent)
@@ -499,10 +1120,12 @@ class ODMDialog(QDockWidget):
         self.iface = iface
         self.odm = ODMConnection()
         self.current_project = None
-        self.image_paths = []  # Store full image paths
-        self.gcp_points = []  # Store GCP points
+        self.image_paths = []
+        self.gcp_points = []
         self.current_gcp_file = None
-        self.gcp_projection = None  # Store GCP coordinate reference system
+        self.gcp_projection = None
+        self.gcp_map_tool = None
+        self.pending_gcp_image_point = None
         self.init_ui()
         
     def init_ui(self):
@@ -987,6 +1610,37 @@ class ODMDialog(QDockWidget):
         gcp_points_layout.addLayout(gcp_controls_layout)
         gcp_points_group.setLayout(gcp_points_layout)
 
+        # Image points list for selected GCP
+        gcp_images_group = QGroupBox('Image Points')
+        gcp_images_layout = QVBoxLayout()
+        gcp_images_layout.setContentsMargins(5, 5, 5, 5)
+        gcp_images_layout.setSpacing(3)
+
+        self.gcp_images_list = QListWidget()
+        self.gcp_images_list.setMaximumHeight(60)
+        self.gcp_images_list.setMinimumHeight(40)
+        self.gcp_images_list.itemDoubleClicked.connect(self.view_gcp_image_point)
+        gcp_images_layout.addWidget(self.gcp_images_list)
+
+        images_btn_layout = QHBoxLayout()
+        self.add_image_point_btn = QPushButton('+ Add')
+        self.add_image_point_btn.setMaximumWidth(60)
+        self.add_image_point_btn.setToolTip('Add image point from Photos panel')
+        self.add_image_point_btn.clicked.connect(self.add_image_point_from_photos)
+        self.add_image_point_btn.setEnabled(False)
+        
+        self.remove_image_point_btn = QPushButton('Remove')
+        self.remove_image_point_btn.setMaximumWidth(60)
+        self.remove_image_point_btn.clicked.connect(self.remove_gcp_image_point)
+        self.remove_image_point_btn.setEnabled(False)
+        
+        images_btn_layout.addWidget(self.add_image_point_btn)
+        images_btn_layout.addWidget(self.remove_image_point_btn)
+        images_btn_layout.addStretch()
+        gcp_images_layout.addLayout(images_btn_layout)
+        
+        gcp_images_group.setLayout(gcp_images_layout)
+
         # Compact GCP info display
         gcp_info_group = QGroupBox('Point Info')
         gcp_info_layout = QVBoxLayout()
@@ -1004,24 +1658,35 @@ class ODMDialog(QDockWidget):
         self.gcp_world_label = QLabel('-, -, -')
         info_grid.addWidget(self.gcp_world_label, 1, 1)
 
-        info_grid.addWidget(QLabel('Image:'), 2, 0)
-        self.gcp_image_label = QLabel('-, -')
-        info_grid.addWidget(self.gcp_image_label, 2, 1)
-
-        info_grid.addWidget(QLabel('File:'), 3, 0)
-        self.gcp_filename_label = QLabel('-')
-        info_grid.addWidget(self.gcp_filename_label, 3, 1)
-
-        info_grid.addWidget(QLabel('Name:'), 4, 0)
+        info_grid.addWidget(QLabel('Name:'), 2, 0)
         self.gcp_name_label = QLabel('-')
-        info_grid.addWidget(self.gcp_name_label, 4, 1)
+        info_grid.addWidget(self.gcp_name_label, 2, 1)
+
+        info_grid.addWidget(QLabel('Checkpoint:'), 3, 0)
+        self.gcp_checkpoint_label = QLabel('No')
+        info_grid.addWidget(self.gcp_checkpoint_label, 3, 1)
 
         gcp_info_layout.addLayout(info_grid)
         gcp_info_group.setLayout(gcp_info_layout)
 
+        # CRS setting
+        crs_group = QGroupBox('Coordinate System')
+        crs_layout = QHBoxLayout()
+        crs_layout.setContentsMargins(5, 5, 5, 5)
+        crs_layout.addWidget(QLabel('CRS:'))
+        self.gcp_crs_edit = QLineEdit()
+        self.gcp_crs_edit.setPlaceholderText('EPSG:4326')
+        self.gcp_crs_edit.setMaximumWidth(100)
+        self.gcp_crs_edit.setText('EPSG:4326')
+        crs_layout.addWidget(self.gcp_crs_edit)
+        crs_layout.addStretch()
+        crs_group.setLayout(crs_layout)
+
         # Add all groups to GCP layout
         gcp_layout.addWidget(gcp_file_group)
+        gcp_layout.addWidget(crs_group)
         gcp_layout.addWidget(gcp_points_group)
+        gcp_layout.addWidget(gcp_images_group)
         gcp_layout.addWidget(gcp_info_group)
         gcp_layout.addStretch()
 
@@ -2060,7 +2725,7 @@ class ODMDialog(QDockWidget):
 
 
     def load_gcp_file(self):
-        """Load a GCP file (ODM format only)"""
+        """Load a GCP file (ODM format) with support for multiple image points per GCP"""
         file_path, _ = QFileDialog.getOpenFileName(
             self, 'Load GCP File', '', 'GCP Files (*.txt);;All Files (*.*)'
         )
@@ -2069,7 +2734,8 @@ class ODMDialog(QDockWidget):
             return
 
         try:
-            self.gcp_points = []
+            # Group lines by GCP name for multi-image support
+            gcp_dict = {}  # key: gcp_name or generated ID, value: gcp data
             self.gcp_projection = None
 
             with open(file_path, 'r') as f:
@@ -2082,83 +2748,69 @@ class ODMDialog(QDockWidget):
             # Check if first line is a projection definition
             first_line = lines[0].strip()
             if self._is_projection_line(first_line):
-                # ODM format: first line is projection
                 self.gcp_projection = first_line
+                self.gcp_crs_edit.setText(first_line)
                 data_lines = lines[1:]
-                start_line_num = 2
             else:
-                # Assume ODM format without explicit projection (default to EPSG:4326)
                 self.gcp_projection = 'EPSG:4326'
+                self.gcp_crs_edit.setText('EPSG:4326')
                 data_lines = lines
-                start_line_num = 1
 
-            # Parse data lines (whitespace separated)
-            for line_num, line in enumerate(data_lines, start_line_num):
+            # Parse data lines
+            for line_num, line in enumerate(data_lines, start=2):
                 line = line.strip()
                 if not line or line.startswith('#'):
                     continue
 
-                # Parse GCP line: geo_x geo_y geo_z im_x im_y filename [gcp_name]
                 parts = line.split()
                 num_parts = len(parts)
 
                 if num_parts >= 6:
-                    # Standard ODM format: geo_x geo_y geo_z im_x im_y filename [gcp_name]
                     try:
-                        gcp_point = {
-                            'id': len(self.gcp_points) + 1,
-                            'world_x': float(parts[0]),  # geo_x (easting/longitude)
-                            'world_y': float(parts[1]),  # geo_y (northing/latitude)
-                            'world_z': float(parts[2]),  # geo_z (elevation)
-                            'image_x': float(parts[3]),  # im_x (pixel x)
-                            'image_y': float(parts[4]),  # im_y (pixel y)
-                            'filename': parts[5],        # image filename
-                            'gcp_name': parts[6] if num_parts > 6 else '',  # optional GCP name
-                            'line_num': line_num
-                        }
-                        self.gcp_points.append(gcp_point)
-                    except ValueError as e:
-                        QMessageBox.warning(self, 'Parse Error',
-                                          f'Error parsing line {line_num}: {line}\n{str(e)}')
+                        world_x = float(parts[0])
+                        world_y = float(parts[1])
+                        world_z = float(parts[2])
+                        image_x = float(parts[3])
+                        image_y = float(parts[4])
+                        filename = parts[5]
+                        gcp_name = parts[6] if num_parts > 6 else f"GCP_{len(gcp_dict) + 1}"
 
-                elif num_parts == 4:
-                    # Check if this is name-first format: gcp_name geo_x geo_y geo_z
-                    try:
-                        # Try to parse as numbers for coordinates (fields 2, 3, 4)
-                        float(parts[1]), float(parts[2]), float(parts[3])
-                        QMessageBox.warning(self, 'Incomplete GCP Data',
-                                          f'Line {line_num} is missing required pixel coordinates and filename.\n'
-                                          f'Found: {line}\n\n'
-                                          'ODM requires FULL GCP data including:\n'
-                                          '• Geographic coordinates (X, Y, Z)\n'
-                                          '• Pixel coordinates (where the point appears in the image)\n'
-                                          '• Image filename (which image contains this point)\n\n'
-                                          'Correct format: geo_x geo_y geo_z im_x im_y filename [gcp_name]\n'
-                                          'Example: 544256.7 5320919.9 5 3044 2622 IMG_0525.jpg GCP01\n\n'
-                                          'To create proper GCPs:\n'
-                                          '1. Mark points on your images in an image editor\n'
-                                          '2. Record pixel coordinates (x, y) where you clicked\n'
-                                          '3. Measure real-world coordinates (GPS/survey)\n'
-                                          '4. Include the image filename for each point')
-                    except ValueError:
-                        QMessageBox.warning(self, 'Parse Error',
-                                          f'Invalid GCP format on line {line_num}: {line}\n'
-                                          'Expected numeric coordinates in fields 2-4.')
-                else:
-                    QMessageBox.warning(self, 'Parse Error',
-                                      f'Invalid GCP format on line {line_num}: {line}\n'
-                                      f'Expected 6+ fields (geo_x geo_y geo_z im_x im_y filename), got {num_parts} fields.')
+                        # Create unique key for this GCP
+                        gcp_key = gcp_name
+
+                        if gcp_key not in gcp_dict:
+                            gcp_dict[gcp_key] = {
+                                'id': len(gcp_dict) + 1,
+                                'world_x': world_x,
+                                'world_y': world_y,
+                                'world_z': world_z,
+                                'gcp_name': gcp_name,
+                                'is_checkpoint': False,
+                                'image_points': []
+                            }
+
+                        # Add image point to this GCP
+                        gcp_dict[gcp_key]['image_points'].append({
+                            'filename': filename,
+                            'x': image_x,
+                            'y': image_y
+                        })
+
+                    except ValueError as e:
+                        print(f"Error parsing line {line_num}: {line} - {e}")
+
+            # Convert to list
+            self.gcp_points = list(gcp_dict.values())
 
             if self.gcp_points:
                 self.current_gcp_file = file_path
                 self.gcp_file_path.setText(file_path)
                 self.update_gcp_list()
-                projection_info = f" (Projection: {self.gcp_projection})" if self.gcp_projection else ""
+                total_images = sum(len(g['image_points']) for g in self.gcp_points)
                 QMessageBox.information(self, 'Success',
-                                      f'Loaded {len(self.gcp_points)} GCP points{projection_info}')
+                    f'Loaded {len(self.gcp_points)} GCPs with {total_images} image points')
             else:
-                QMessageBox.warning(self, 'No GCPs Found',
-                                  'No valid GCP points were found in the file.')
+                QMessageBox.warning(self, 'No GCPs Found', 'No valid GCP points found in the file.')
 
         except Exception as e:
             QMessageBox.critical(self, 'Error', f'Failed to load GCP file: {str(e)}')
@@ -2177,46 +2829,32 @@ class ODMDialog(QDockWidget):
             return
 
         try:
+            # Get CRS from UI
+            crs_text = self.gcp_crs_edit.text().strip() or 'EPSG:4326'
+
             with open(file_path, 'w') as f:
-                # Write projection header (required for ODM format)
-                if hasattr(self, 'gcp_projection') and self.gcp_projection:
-                    f.write(f"{self.gcp_projection}\n")
-                else:
-                    # Default to WGS84 geographic if no projection specified
-                    f.write("EPSG:4326\n")
-
-                # Write header comments
+                f.write(f"{crs_text}\n")
                 f.write('# GCP file generated by ODM Frontend\n')
-                f.write('# Compatible with OpenDroneMap/WebODM\n')
-                f.write('# Format: geo_x geo_y geo_z im_x im_y filename [gcp_name]\n')
-                f.write('# Fields separated by tabs\n')
+                f.write('# Format: geo_x geo_y geo_z im_x im_y filename gcp_name\n')
 
-                # Write GCP data (tab-separated)
                 for gcp in self.gcp_points:
-                    fields = [
-                        f"{gcp['world_x']}",    # geo_x
-                        f"{gcp['world_y']}",    # geo_y
-                        f"{gcp['world_z']}",    # geo_z
-                        f"{gcp['image_x']}",    # im_x
-                        f"{gcp['image_y']}",    # im_y
-                        gcp['filename']         # image filename
-                    ]
-
-                    # Add optional GCP name if present
-                    if gcp.get('gcp_name'):
-                        fields.append(gcp['gcp_name'])
-
-                    # Join with tabs and write line
-                    line = '\t'.join(fields) + '\n'
-                    f.write(line)
+                    for img_pt in gcp.get('image_points', []):
+                        fields = [
+                            f"{gcp['world_x']}",
+                            f"{gcp['world_y']}",
+                            f"{gcp['world_z']}",
+                            f"{img_pt['x']}",
+                            f"{img_pt['y']}",
+                            img_pt['filename'],
+                            gcp.get('gcp_name', f"GCP{gcp['id']}")
+                        ]
+                        f.write('\t'.join(fields) + '\n')
 
             self.current_gcp_file = file_path
             self.gcp_file_path.setText(file_path)
-
-            projection_info = f" (Projection: {self.gcp_projection or 'EPSG:4326'})"
+            total_images = sum(len(g.get('image_points', [])) for g in self.gcp_points)
             QMessageBox.information(self, 'Success',
-                                  f'Saved {len(self.gcp_points)} GCP points to {os.path.basename(file_path)}\n'
-                                  f'Format: ODM-compatible (tab-separated){projection_info}')
+                f'Saved {len(self.gcp_points)} GCPs with {total_images} image points')
 
         except Exception as e:
             QMessageBox.critical(self, 'Error', f'Failed to save GCP file: {str(e)}')
@@ -2225,204 +2863,216 @@ class ODMDialog(QDockWidget):
         """Update the GCP points list display"""
         self.gcp_list.clear()
         for gcp in self.gcp_points:
-            gcp_name = f" ({gcp['gcp_name']})" if gcp.get('gcp_name') else ""
-            item_text = f"GCP {gcp['id']}{gcp_name}: ({gcp['world_x']:.2f}, {gcp['world_y']:.2f}, {gcp['world_z']:.2f}) → {gcp['filename']}"
+            gcp_name = gcp.get('gcp_name', f"GCP{gcp['id']}")
+            img_count = len(gcp.get('image_points', []))
+            checkpoint = " [Checkpoint]" if gcp.get('is_checkpoint') else ""
+            item_text = f"{gcp_name} ({img_count} images){checkpoint}"
             self.gcp_list.addItem(item_text)
 
     def select_gcp_point(self, item):
         """Handle GCP point selection"""
-        try:
-            # Extract GCP ID from item text
-            text = item.text()
-            if text.startswith('GCP '):
-                gcp_id = int(text.split()[1].rstrip(':'))
-                gcp = next((g for g in self.gcp_points if g['id'] == gcp_id), None)
-                if gcp:
-                    self.gcp_id_label.setText(f"ID: {gcp['id']}")
-                    self.gcp_world_label.setText(f"World: {gcp['world_x']:.2f}, {gcp['world_y']:.2f}, {gcp['world_z']:.2f}")
-                    self.gcp_image_label.setText(f"Image: {gcp['image_x']:.1f}, {gcp['image_y']:.1f}")
-                    self.gcp_filename_label.setText(f"File: {gcp['filename']}")
-                    self.gcp_name_label.setText(f"Name: {gcp.get('gcp_name', '-')}")
+        row = self.gcp_list.row(item)
+        if 0 <= row < len(self.gcp_points):
+            gcp = self.gcp_points[row]
+            gcp_name = gcp.get('gcp_name', f"GCP{gcp['id']}")
+            
+            self.gcp_id_label.setText(f"ID: {gcp['id']}")
+            self.gcp_world_label.setText(f"{gcp['world_x']:.2f}, {gcp['world_y']:.2f}, {gcp['world_z']:.2f}")
+            self.gcp_name_label.setText(gcp_name)
+            self.gcp_checkpoint_label.setText("Yes" if gcp.get('is_checkpoint') else "No")
+            
+            self.edit_gcp_btn.setEnabled(True)
+            self.remove_gcp_btn.setEnabled(True)
+            self.add_image_point_btn.setEnabled(True)
+            
+            self.update_gcp_images_list(gcp)
 
-                    self.edit_gcp_btn.setEnabled(True)
-                    self.remove_gcp_btn.setEnabled(True)
-                else:
-                    self.clear_gcp_info()
-        except Exception as e:
-            self.clear_gcp_info()
-            print(f"Error selecting GCP: {e}")
+    def update_gcp_images_list(self, gcp):
+        """Update the image points list for a selected GCP"""
+        self.gcp_images_list.clear()
+        for img_pt in gcp.get('image_points', []):
+            item_text = f"{img_pt['filename']}: ({img_pt['x']:.1f}, {img_pt['y']:.1f})"
+            self.gcp_images_list.addItem(item_text)
+        
+        has_images = len(gcp.get('image_points', [])) > 0
+        self.remove_image_point_btn.setEnabled(has_images)
 
     def clear_gcp_info(self):
         """Clear GCP information display"""
         self.gcp_id_label.setText('ID: -')
-        self.gcp_world_label.setText('World: -, -, -')
-        self.gcp_image_label.setText('Image: -, -')
-        self.gcp_filename_label.setText('File: -')
-        self.gcp_name_label.setText('Name: -')
+        self.gcp_world_label.setText('-, -, -')
+        self.gcp_name_label.setText('-')
+        self.gcp_checkpoint_label.setText('No')
+        self.gcp_images_list.clear()
         self.edit_gcp_btn.setEnabled(False)
         self.remove_gcp_btn.setEnabled(False)
+        self.add_image_point_btn.setEnabled(False)
+        self.remove_image_point_btn.setEnabled(False)
 
     def add_gcp_point(self):
-        """Add a new GCP point"""
-        from qgis.PyQt.QtWidgets import QDialog, QFormLayout, QDialogButtonBox, QDoubleSpinBox
+        """Start adding a new GCP by selecting an image point"""
+        if not self.image_paths:
+            QMessageBox.warning(self, 'No Images', 'Add images to the project first.')
+            return
+        
+        QMessageBox.information(self, 'Add GCP', 
+            'Double-click an image in the Photos panel to mark a GCP point.')
 
-        class GCPDialog(QDialog):
-            def __init__(self, parent=None):
-                super().__init__(parent)
-                self.setWindowTitle('Add GCP Point')
-                self.setModal(True)
+    def add_image_point_from_photos(self):
+        """Add an image point to the selected GCP from Photos panel"""
+        current_item = self.gcp_list.currentItem()
+        if not current_item:
+            return
+        
+        QMessageBox.information(self, 'Add Image Point',
+            'Double-click an image in the Photos panel to mark another point for this GCP.')
 
-                layout = QFormLayout()
-
-                self.world_x = QDoubleSpinBox()
-                self.world_x.setRange(-1000000, 1000000)
-                self.world_x.setDecimals(2)
-
-                self.world_y = QDoubleSpinBox()
-                self.world_y.setRange(-1000000, 1000000)
-                self.world_y.setDecimals(2)
-
-                self.world_z = QDoubleSpinBox()
-                self.world_z.setRange(-10000, 10000)
-                self.world_z.setDecimals(2)
-
-                self.image_x = QDoubleSpinBox()
-                self.image_x.setRange(0, 10000)
-                self.image_x.setDecimals(1)
-
-                self.image_y = QDoubleSpinBox()
-                self.image_y.setRange(0, 10000)
-                self.image_y.setDecimals(1)
-
-                self.filename = QLineEdit()
-                self.filename.setPlaceholderText('Image filename (optional)')
-
-                layout.addRow('World X:', self.world_x)
-                layout.addRow('World Y:', self.world_y)
-                layout.addRow('World Z:', self.world_z)
-                layout.addRow('Image X:', self.image_x)
-                layout.addRow('Image Y:', self.image_y)
-                layout.addRow('Image File:', self.filename)
-
-                buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-                buttons.accepted.connect(self.accept)
-                buttons.rejected.connect(self.reject)
-                layout.addRow(buttons)
-
-                self.setLayout(layout)
-
-            def get_values(self):
-                return {
-                    'world_x': self.world_x.value(),
-                    'world_y': self.world_y.value(),
-                    'world_z': self.world_z.value(),
-                    'image_x': self.image_x.value(),
-                    'image_y': self.image_y.value(),
-                    'filename': self.filename.text().strip()
+    def add_image_point_to_gcp_workflow(self, pixel_x, pixel_y, filename):
+        """Handle GCP image point selection from PhotosDock"""
+        # Find the full image path
+        full_path = None
+        for path in self.image_paths:
+            if os.path.basename(path) == filename:
+                full_path = path
+                break
+        
+        # Show selector dialog
+        selector = GCPSelectorDialog(pixel_x, pixel_y, filename, self.gcp_points, self)
+        if selector.exec_() == QDialog.Accepted:
+            gcp_id, create_new = selector.get_selection()
+            
+            if create_new:
+                # Store pending point and activate map tool
+                self.pending_gcp_image_point = {
+                    'pixel_x': pixel_x,
+                    'pixel_y': pixel_y,
+                    'filename': filename
                 }
+                self.start_gcp_map_tool()
+            else:
+                # Add to existing GCP
+                gcp = next((g for g in self.gcp_points if g['id'] == gcp_id), None)
+                if gcp:
+                    if 'image_points' not in gcp:
+                        gcp['image_points'] = []
+                    gcp['image_points'].append({
+                        'filename': filename,
+                        'x': pixel_x,
+                        'y': pixel_y
+                    })
+                    self.update_gcp_list()
+                    QMessageBox.information(self, 'Success', 
+                        f'Added image point to {gcp.get("gcp_name", f"GCP{gcp_id}")}')
 
-        dialog = GCPDialog(self)
-        if dialog.exec_() == QDialog.Accepted:
-            values = dialog.get_values()
-            gcp_point = {
+    def start_gcp_map_tool(self):
+        """Activate the map tool for selecting GCP world coordinates"""
+        canvas = self.iface.mapCanvas()
+        self.gcp_map_tool = GCPMapTool(canvas)
+        self.gcp_map_tool.point_picked.connect(self.on_gcp_map_point_picked)
+        canvas.setMapTool(self.gcp_map_tool)
+        
+        self.iface.messageBar().pushMessage('GCP', 
+            'Click on the map to set the world coordinates for this GCP', 
+            level=0)
+
+    def on_gcp_map_point_picked(self, world_x, world_y):
+        """Handle when a point is picked on the map"""
+        if not self.pending_gcp_image_point:
+            return
+        
+        pending = self.pending_gcp_image_point
+        
+        # Show properties dialog
+        props = GCPPropertiesDialog(
+            pending['pixel_x'], 
+            pending['pixel_y'], 
+            pending['filename'],
+            world_x, 
+            world_y,
+            self,
+            self.iface
+        )
+        
+        if props.exec_() == QDialog.Accepted:
+            data = props.get_gcp_data()
+            
+            new_gcp = {
                 'id': len(self.gcp_points) + 1,
-                'world_x': values['world_x'],
-                'world_y': values['world_y'],
-                'world_z': values['world_z'],
-                'image_x': values['image_x'],
-                'image_y': values['image_y'],
-                'filename': values['filename'],
-                'line_num': 0
+                'world_x': data['world_x'],
+                'world_y': data['world_y'],
+                'world_z': data['world_z'],
+                'gcp_name': data['gcp_name'] or f"GCP{len(self.gcp_points) + 1}",
+                'is_checkpoint': data['is_checkpoint'],
+                'image_points': [{
+                    'filename': pending['filename'],
+                    'x': pending['pixel_x'],
+                    'y': pending['pixel_y']
+                }]
             }
-            self.gcp_points.append(gcp_point)
+            
+            self.gcp_points.append(new_gcp)
             self.update_gcp_list()
-            QMessageBox.information(self, 'Success', f'GCP point {gcp_point["id"]} added')
+            QMessageBox.information(self, 'Success', 
+                f'Created {new_gcp["gcp_name"]} with image point')
+        
+        self.pending_gcp_image_point = None
 
     def edit_gcp_point(self):
         """Edit the selected GCP point"""
-        # Find selected GCP
         current_item = self.gcp_list.currentItem()
         if not current_item:
             return
 
-        try:
-            text = current_item.text()
-            gcp_id = int(text.split()[1].rstrip(':'))
-            gcp = next((g for g in self.gcp_points if g['id'] == gcp_id), None)
-            if not gcp:
-                return
-
-            from qgis.PyQt.QtWidgets import QDialog, QFormLayout, QDialogButtonBox, QDoubleSpinBox
-
-            class GCPDialog(QDialog):
-                def __init__(self, gcp_data, parent=None):
-                    super().__init__(parent)
-                    self.setWindowTitle('Edit GCP Point')
-                    self.setModal(True)
-
-                    layout = QFormLayout()
-
-                    self.world_x = QDoubleSpinBox()
-                    self.world_x.setRange(-1000000, 1000000)
-                    self.world_x.setDecimals(2)
-                    self.world_x.setValue(gcp_data['world_x'])
-
-                    self.world_y = QDoubleSpinBox()
-                    self.world_y.setRange(-1000000, 1000000)
-                    self.world_y.setDecimals(2)
-                    self.world_y.setValue(gcp_data['world_y'])
-
-                    self.world_z = QDoubleSpinBox()
-                    self.world_z.setRange(-10000, 10000)
-                    self.world_z.setDecimals(2)
-                    self.world_z.setValue(gcp_data['world_z'])
-
-                    self.image_x = QDoubleSpinBox()
-                    self.image_x.setRange(0, 10000)
-                    self.image_x.setDecimals(1)
-                    self.image_x.setValue(gcp_data['image_x'])
-
-                    self.image_y = QDoubleSpinBox()
-                    self.image_y.setRange(0, 10000)
-                    self.image_y.setDecimals(1)
-                    self.image_y.setValue(gcp_data['image_y'])
-
-                    self.filename = QLineEdit(gcp_data['filename'])
-
-                    layout.addRow('World X:', self.world_x)
-                    layout.addRow('World Y:', self.world_y)
-                    layout.addRow('World Z:', self.world_z)
-                    layout.addRow('Image X:', self.image_x)
-                    layout.addRow('Image Y:', self.image_y)
-                    layout.addRow('Image File:', self.filename)
-
-                    buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-                    buttons.accepted.connect(self.accept)
-                    buttons.rejected.connect(self.reject)
-                    layout.addRow(buttons)
-
-                    self.setLayout(layout)
-
-                def get_values(self):
-                    return {
-                        'world_x': self.world_x.value(),
-                        'world_y': self.world_y.value(),
-                        'world_z': self.world_z.value(),
-                        'image_x': self.image_x.value(),
-                        'image_y': self.image_y.value(),
-                        'filename': self.filename.text().strip()
-                    }
-
-            dialog = GCPDialog(gcp, self)
+        row = self.gcp_list.row(current_item)
+        if 0 <= row < len(self.gcp_points):
+            gcp = self.gcp_points[row]
+            
+            # Simple edit dialog
+            from qgis.PyQt.QtWidgets import QFormLayout
+            
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f'Edit {gcp.get("gcp_name", "GCP")}')
+            dialog.setModal(True)
+            layout = QFormLayout(dialog)
+            
+            name_edit = QLineEdit(gcp.get('gcp_name', ''))
+            layout.addRow('Name:', name_edit)
+            
+            x_spin = QDoubleSpinBox()
+            x_spin.setRange(-999999999, 999999999)
+            x_spin.setDecimals(6)
+            x_spin.setValue(gcp['world_x'])
+            layout.addRow('X:', x_spin)
+            
+            y_spin = QDoubleSpinBox()
+            y_spin.setRange(-999999999, 999999999)
+            y_spin.setDecimals(6)
+            y_spin.setValue(gcp['world_y'])
+            layout.addRow('Y:', y_spin)
+            
+            z_spin = QDoubleSpinBox()
+            z_spin.setRange(-99999, 99999)
+            z_spin.setDecimals(3)
+            z_spin.setValue(gcp['world_z'])
+            layout.addRow('Z:', z_spin)
+            
+            checkpoint_check = QCheckBox()
+            checkpoint_check.setChecked(gcp.get('is_checkpoint', False))
+            layout.addRow('Checkpoint:', checkpoint_check)
+            
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addRow(buttons)
+            
             if dialog.exec_() == QDialog.Accepted:
-                values = dialog.get_values()
-                gcp.update(values)
+                gcp['gcp_name'] = name_edit.text().strip() or gcp.get('gcp_name', f"GCP{gcp['id']}")
+                gcp['world_x'] = x_spin.value()
+                gcp['world_y'] = y_spin.value()
+                gcp['world_z'] = z_spin.value()
+                gcp['is_checkpoint'] = checkpoint_check.isChecked()
                 self.update_gcp_list()
-                self.select_gcp_point(current_item)  # Refresh info display
-                QMessageBox.information(self, 'Success', f'GCP point {gcp["id"]} updated')
-
-        except Exception as e:
-            QMessageBox.critical(self, 'Error', f'Failed to edit GCP point: {str(e)}')
+                self.select_gcp_point(self.gcp_list.item(row))
 
     def remove_gcp_point(self):
         """Remove the selected GCP point"""
@@ -2430,25 +3080,66 @@ class ODMDialog(QDockWidget):
         if not current_item:
             return
 
-        try:
-            text = current_item.text()
-            gcp_id = int(text.split()[1].rstrip(':'))
-
+        row = self.gcp_list.row(current_item)
+        if 0 <= row < len(self.gcp_points):
+            gcp = self.gcp_points[row]
+            gcp_name = gcp.get('gcp_name', f"GCP{gcp['id']}")
+            
             reply = QMessageBox.question(
                 self, 'Confirm Delete',
-                f'Are you sure you want to delete GCP point {gcp_id}?',
+                f'Delete {gcp_name} and all its image points?',
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No
             )
 
             if reply == QMessageBox.Yes:
-                self.gcp_points = [g for g in self.gcp_points if g['id'] != gcp_id]
-                # Renumber remaining GCPs
-                for i, gcp in enumerate(self.gcp_points, 1):
-                    gcp['id'] = i
+                self.gcp_points.pop(row)
+                for i, g in enumerate(self.gcp_points, 1):
+                    g['id'] = i
                 self.update_gcp_list()
                 self.clear_gcp_info()
-                QMessageBox.information(self, 'Success', 'GCP point deleted')
 
-        except Exception as e:
-            QMessageBox.critical(self, 'Error', f'Failed to delete GCP point: {str(e)}')
+    def remove_gcp_image_point(self):
+        """Remove the selected image point from the current GCP"""
+        current_gcp_item = self.gcp_list.currentItem()
+        current_img_item = self.gcp_images_list.currentItem()
+        
+        if not current_gcp_item or not current_img_item:
+            return
+        
+        gcp_row = self.gcp_list.row(current_gcp_item)
+        img_row = self.gcp_images_list.row(current_img_item)
+        
+        if 0 <= gcp_row < len(self.gcp_points):
+            gcp = self.gcp_points[gcp_row]
+            if 0 <= img_row < len(gcp.get('image_points', [])):
+                gcp['image_points'].pop(img_row)
+                self.update_gcp_list()
+                self.update_gcp_images_list(gcp)
+
+    def view_gcp_image_point(self, item):
+        """View the image for a GCP image point"""
+        current_gcp_item = self.gcp_list.currentItem()
+        if not current_gcp_item:
+            return
+        
+        gcp_row = self.gcp_list.row(current_gcp_item)
+        img_row = self.gcp_images_list.row(item)
+        
+        if 0 <= gcp_row < len(self.gcp_points):
+            gcp = self.gcp_points[gcp_row]
+            img_points = gcp.get('image_points', [])
+            if 0 <= img_row < len(img_points):
+                img_pt = img_points[img_row]
+                filename = img_pt['filename']
+                
+                # Find full path
+                for path in self.image_paths:
+                    if os.path.basename(path) == filename:
+                        viewer = GCPImagePickerDialog(path, self)
+                        viewer.selected_point = (img_pt['x'], img_pt['y'])
+                        viewer.point_label.setText(f"Pixel: ({img_pt['x']:.1f}, {img_pt['y']:.1f})")
+                        viewer.confirm_btn.setEnabled(True)
+                        viewer.draw_marker()
+                        viewer.exec_()
+                        break
