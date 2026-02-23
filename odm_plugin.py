@@ -13,7 +13,6 @@ class ODMPlugin:
         self.plugin_dir = os.path.dirname(__file__)
         self.action = None
         self.dock = None
-        self.photos_dock = None
         
     def initGui(self):
         # Use custom drone icon
@@ -27,9 +26,10 @@ class ODMPlugin:
         self.iface.removePluginMenu('ODM Frontend', self.action)
         self.iface.removeToolBarIcon(self.action)
         if self.dock:
+            # Clean up photos dock first
+            if hasattr(self.dock, 'photos_dock') and self.dock.photos_dock:
+                self.iface.removeDockWidget(self.dock.photos_dock)
             self.iface.removeDockWidget(self.dock)
-        if self.photos_dock:
-            self.iface.removeDockWidget(self.photos_dock)
         
     def run(self):
         if self.dock is None:
